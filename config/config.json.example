@@ -1,0 +1,18 @@
+{
+  "kanbn": {
+    "baseUrl": "https://kan.example.com"
+  },
+  "github": {
+    "repositories": [
+      "your-username/repo-one",
+      "your-username/repo-two",
+      "your-username/repo-three"
+    ]
+  },
+  "sync": {
+    "intervalMinutes": 1
+  },
+  "server": {
+    "port": 3001
+  }
+}
