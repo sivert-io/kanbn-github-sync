@@ -1,0 +1,24 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# TypeScript files
+*.ts linguist-language=TypeScript
+*.tsx linguist-language=TypeScript
+
+# Documentation
+*.md linguist-documentation
+*.mdx linguist-documentation
+
+# Configuration files
+*.json linguist-generated=false
+*.yml linguist-generated=false
+*.yaml linguist-generated=false
+
+# Docker files
+Dockerfile linguist-generated=false
+docker-compose.yml linguist-generated=false
+
+# Ignore build outputs
+dist/** linguist-generated=true
+node_modules/** linguist-generated=true
+*.log linguist-generated=true

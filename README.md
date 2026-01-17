@@ -1,14 +1,19 @@
-# <img src="kgs-icon.svg" width="24" height="24" alt="KGS"> Kanbn GitHub Sync (KGS)
+<div align="center">
+  <img src="kgs-icon.svg" alt="Kanbn GitHub Sync" width="140" height="140">
+  
+  # Kanbn GitHub Sync (KGS)
+  
+  ⚡ **Automated GitHub issue synchronization to Kanbn — zero manual board setup**
+  
+  <p>Automatically syncs GitHub issues to Kanbn cards with intelligent list assignment. Creates boards and lists automatically - no manual configuration required.</p>
 
-⚡ **Automated GitHub issue synchronization to Kanbn — zero manual board setup**
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](docker/docker-compose.yml)
+[![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
-Automatically syncs GitHub issues to Kanbn cards with intelligent list assignment. Creates boards and lists automatically - no manual configuration required.
+**📚 [Full Documentation](./docs/README.md)** • [Quick Start](./docs/SETUP.md) • [Features](#-features) • [Troubleshooting](./docs/SETUP.md#troubleshooting)
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.3-blue)
-![Docker](https://img.shields.io/badge/Docker-supported-success)
-
-**📚 Full Documentation** • Quick Start • Features • Troubleshooting
+</div>
 
 ---
 
@@ -31,10 +36,10 @@ Automatically syncs GitHub issues to Kanbn cards with intelligent list assignmen
 
 ## ⚙️ Requirements
 
-* **Node.js 18+** (for native fetch support)
-* **Docker** and **Docker Compose** (optional, for containerized deployment)
-* A running **Kanbn instance** (e.g., `https://kan.example.com`)
-* Your **Kanbn API key**
+- **Node.js 18+** (for native fetch support)
+- **Docker** and **Docker Compose** (optional, for containerized deployment) ([Install Docker](https://docs.docker.com/engine/install/))
+- A running **Kanbn instance** (e.g., `https://kan.example.com`)
+- Your **Kanbn API key**
 
 ---
 
@@ -59,7 +64,7 @@ Get up and running in minutes:
    yarn start
    ```
 
-👉 **Read the complete [Setup Guide](./docs/SETUP.md)** for detailed instructions.
+👉 **[Read the complete Setup Guide](./docs/SETUP.md)** for detailed instructions.
 
 ### 🐳 Docker
 
@@ -119,29 +124,20 @@ Issues are automatically assigned to the correct list based on their GitHub stat
 
 ---
 
-## 📝 Scripts
-
-- `yarn start` - Start the service
-- `yarn dev` - Start in development mode with hot reload
-- `yarn build` - Build TypeScript to JavaScript
-- `yarn lint` - Run ESLint
-- `yarn lint:fix` - Fix ESLint errors automatically
-- `yarn type-check` - Type check without building
-
----
-
 ## 🤝 Contributing
 
 Contributions are welcome! Whether you're fixing bugs, adding features, improving docs, or sharing ideas.
 
-👉 **Read the [Contributing Guide](./.github/CONTRIBUTING.md)**
+👉 **[Read the Contributing Guide](.github/CONTRIBUTING.md)**
 
 ---
 
 ## 📜 License
 
-MIT License - see [LICENSE](./LICENSE) for details
+MIT License - see [LICENSE](LICENSE) for details
 
 ---
 
-**Made with ❤️ for productive issue management**
+<div align="center">
+  <strong>Made with ❤️ for productive issue management</strong>
+</div>
