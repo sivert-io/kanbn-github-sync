@@ -1,7 +1,7 @@
 {
   "name": "kanbn-github-sync",
   "version": "1.0.0",
-  "description": "Automatically sync GitHub issues to Kanbn cards via polling",
+  "description": "Automated GitHub issue synchronization to Kanbn — zero manual board setup",
   "main": "src/index.ts",
   "scripts": {
     "start": "tsx src/index.ts",
@@ -16,7 +16,11 @@
     "github",
     "sync",
     "issues",
-    "polling"
+    "kanban",
+    "project-management",
+    "automation",
+    "typescript",
+    "docker"
   ],
   "author": "",
   "license": "MIT",
