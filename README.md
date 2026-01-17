@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="kgs-icon.svg" alt="Kanbn GitHub Sync" width="140" height="140">
+  <img src="assets/kgs-icon.svg" alt="Kanbn GitHub Sync" width="140" height="140">
   
   # Kanbn GitHub Sync (KGS)
   
