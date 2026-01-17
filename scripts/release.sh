@@ -110,17 +110,33 @@ echo ""
 echo "Version bumped: ${CURRENT_VERSION} → ${NEW_VERSION}"
 echo "Docker image tagged: kanbn-github-sync:latest, kanbn-github-sync:${TAG}"
 echo ""
-read -p "Push to remote? (y/N) " -n 1 -r
+read -p "Push to remote and create GitHub release? (y/N) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
   echo -e "${GREEN}Pushing to remote...${NC}"
   git push origin main
   git push origin "$TAG"
+  
+  # Create GitHub release
+  if command -v gh &> /dev/null; then
+    echo -e "${GREEN}Creating GitHub release...${NC}"
+    gh release create "$TAG" \
+      --title "Release ${TAG}" \
+      --notes "Release ${TAG}" \
+      --target main || echo -e "${YELLOW}Warning: Failed to create GitHub release (gh CLI not available or not authenticated)${NC}"
+  else
+    echo -e "${YELLOW}gh CLI not found. Skipping GitHub release creation.${NC}"
+    echo -e "${YELLOW}Install GitHub CLI to automatically create releases: https://cli.github.com/${NC}"
+  fi
+  
   echo -e "${GREEN}Release ${TAG} pushed to remote!${NC}"
 else
   echo -e "${YELLOW}Release prepared but not pushed. To push later:${NC}"
   echo "  git push origin main"
   echo "  git push origin $TAG"
+  echo ""
+  echo "To create GitHub release manually:"
+  echo "  gh release create $TAG --title \"Release ${TAG}\" --notes \"Release ${TAG}\""
 fi
 
 echo ""

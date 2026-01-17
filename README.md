@@ -11,7 +11,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](docker/docker-compose.yml)
 [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
-**📚 [Full Documentation](./docs/README.md)** • [Quick Start](./docs/SETUP.md) • [Features](#-features) • [Troubleshooting](./docs/SETUP.md#troubleshooting)
+**📚 [Setup Guide](./docs/SETUP.md)** • [Features](#-features) • [Troubleshooting](./docs/SETUP.md#troubleshooting)
 
 </div>
 
