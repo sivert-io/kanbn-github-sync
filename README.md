@@ -11,7 +11,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](docker/docker-compose.yml)
 [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
-**📚 [Setup Guide](./docs/SETUP.md)** • [Features](#-features) • [Troubleshooting](./docs/SETUP.md#troubleshooting)
+**📚 [Features](#-features)** • [Configuration](#-configuration) • [Troubleshooting](#-troubleshooting)
 
 </div>
 
@@ -64,7 +64,6 @@ Get up and running in minutes:
    yarn start
    ```
 
-👉 **[Read the complete Setup Guide](./docs/SETUP.md)** for detailed instructions.
 
 ### 🐳 Docker
 
@@ -95,16 +94,26 @@ KAN_API_KEY=kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```json
 {
   "kanbn": {
-    "baseUrl": "https://kan.example.com"
+    "baseUrl": "https://kan.example.com",
+    "workspaceUrlSlug": "MAT"
   },
   "github": {
-    "repositories": [
-      "owner/repo-one",
-      "owner/repo-two"
-    ]
+    "repositories": {
+      "owner/repo-one": "My Custom Board Name",
+      "owner/repo-two": "Another Board"
+    }
   },
   "sync": {
     "intervalMinutes": 1
+  },
+  "lists": {
+    "backlog": "📝 Backlog",
+    "selected": "✨ Selected",
+    "inProgress": "⚙️ In Progress",
+    "completed": "🎉 Completed/Closed"
+  },
+  "server": {
+    "port": 3001
   }
 }
 ```
@@ -128,6 +137,27 @@ For each repository, the service automatically:
 ### Automatic List Assignment
 
 Issues are automatically assigned to the correct list based on their GitHub status. Cards automatically move between lists when issue status changes.
+
+## 🔧 Troubleshooting
+
+### Service won't start
+- Check that `KAN_API_KEY` is set in `.env`
+- Verify `kanbn.baseUrl` and `kanbn.workspaceUrlSlug` in `config/config.json`
+- Ensure at least one repository is configured
+
+### Issues not syncing
+- Check service logs
+- Verify GitHub repository names are correct (format: `owner/repo`)
+- Check the `/health` endpoint: `curl http://localhost:3001/health`
+
+### Rate limit errors
+- The service respects GitHub API rate limits (60 requests/hour unauthenticated)
+- Rate limit reset time is shown in error messages with your local timezone
+- If rate limited, the service will stop syncing remaining repos to avoid unnecessary API calls
+
+### Cards not updating
+- The service syncs every minute by default
+- Trigger manual sync: `POST http://localhost:3001/sync`
 
 ---
 
