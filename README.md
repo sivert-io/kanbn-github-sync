@@ -72,6 +72,78 @@ Get up and running in minutes:
 
 ### 🐳 Docker
 
+**Quick start with Docker Compose:**
+
+1. **Create a directory for your deployment:**
+   ```bash
+   mkdir kanbn-github-sync
+   cd kanbn-github-sync
+   ```
+
+2. **Create `docker-compose.yml`:**
+   ```yaml
+   version: '3.8'
+
+   services:
+     kgs:
+       image: sivertio/kanbn-github-sync:latest
+       container_name: kanbn-github-sync
+       restart: unless-stopped
+       env_file:
+         - .env
+       volumes:
+         - ./config.json:/app/config/config.json
+       environment:
+         - NODE_ENV=production
+   ```
+   
+   **Note:** The HTTP server (port) is optional. If you omit `server.port` from `config.json`, the service runs in polling-only mode without exposing any ports.
+
+3. **Create configuration files** (required - docker-compose needs these files to exist):
+   ```bash
+   # Create .env file
+   cat > .env << 'EOF'
+   # Required: Kanbn API key
+   KAN_API_KEY=kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   
+   # Optional: GitHub token (for higher rate limits)
+   # GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   EOF
+   
+   # Create config.json file
+   cat > config.json << 'EOF'
+   {
+     "kanbn": {
+       "baseUrl": "https://kan.example.com",
+       "workspaceUrlSlug": "YOUR_WORKSPACE_SLUG"
+     },
+     "github": {
+       "repositories": {
+         "owner/repo-one": "My Board Name"
+       }
+     },
+     "sync": {
+       "intervalMinutes": 5
+     }
+   }
+   EOF
+   ```
+
+4. **Edit `.env` and `config.json`** with your actual values:
+   - Replace `kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` with your Kanbn API key
+   - Replace `https://kan.example.com` with your Kanbn URL
+   - Replace `YOUR_WORKSPACE_SLUG` with your workspace slug
+   - Replace `owner/repo-one` with your GitHub repositories
+
+5. **Start the service:**
+   ```bash
+   docker-compose up -d
+   ```
+   
+   **Note:** Both `.env` and `config.json` must exist in the same directory as `docker-compose.yml` before starting docker-compose.
+
+**Using the included compose files:**
+
 **Production** (uses Docker Hub image):
 ```bash
 cd docker
