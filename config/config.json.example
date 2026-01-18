@@ -7,8 +7,15 @@
     "repositories": {
       "your-username/repo-one": "My Custom Board Name",
       "your-username/repo-two": "Another Board",
-      "your-username/repo-three": "Third Repository"
+      "your-username/repo-three": {
+        "name": "Third Repository",
+        "slug": "third-repo",
+        "visibility": "public"
+      }
     }
+  },
+  "boards": {
+    "defaultVisibility": "private"
   },
   "sync": {
     "intervalMinutes": 5
@@ -17,6 +24,8 @@
     "backlog": "📝 Backlog",
     "selected": "✨ Selected",
     "inProgress": "⚙️ In Progress",
+    "readyForQa": "✅ Ready for QA",
+    "qualityAssurance": "🔍 Quality Assurance",
     "completed": "🎉 Completed/Closed"
   }
 }

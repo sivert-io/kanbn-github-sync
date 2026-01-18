@@ -5,6 +5,7 @@
 import fetch from 'node-fetch';
 import { GITHUB_TOKEN } from './config';
 import type { GitHubIssue, GitHubComment } from './types';
+import type { GitHubPullRequest } from './types';
 
 /**
  * Fetch comments from a GitHub issue
@@ -186,6 +187,8 @@ export async function fetchGitHubIssues(
     if (pageIssues.length === 0) break;
 
     // Filter out pull requests (they appear in issues endpoint)
+    // We only want to sync issues, not PRs themselves
+    // PRs will have html_url containing '/pull/', issues will have '/issues/'
     const actualIssues = pageIssues.filter((issue) => !issue.html_url.includes('/pull/'));
     issues.push(...actualIssues);
 
@@ -195,6 +198,208 @@ export async function fetchGitHubIssues(
 
   // Issues fetched - count shown in phase 2 summary
   return issues;
+}
+
+/**
+ * Fetch all pull requests from a GitHub repository
+ */
+export async function fetchAllPullRequests(
+  owner: string,
+  repo: string,
+  state: 'open' | 'closed' | 'all' = 'all'
+): Promise<GitHubPullRequest[]> {
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github.v3+json',
+  };
+  
+  // Add GitHub token if provided
+  if (GITHUB_TOKEN) {
+    headers.Authorization = `Bearer ${GITHUB_TOKEN}`;
+  }
+
+  const pullRequests: GitHubPullRequest[] = [];
+  let page = 1;
+  const perPage = 100;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const url = `https://api.github.com/repos/${owner}/${repo}/pulls?state=${state}&per_page=${perPage}&page=${page}`;
+    const response = await fetch(url, { headers });
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        break; // No PRs
+      }
+      
+      // Handle rate limiting
+      if (response.status === 403) {
+        const errorText = await response.text();
+        if (errorText.includes('rate limit')) {
+          const retryAfter = response.headers.get('Retry-After');
+          const xRateLimitReset = response.headers.get('X-RateLimit-Reset');
+          
+          let waitTime: number | null = null;
+          let resetTimestamp: number | null = null;
+          
+          if (retryAfter) {
+            waitTime = parseInt(retryAfter, 10);
+            resetTimestamp = Date.now() + (waitTime * 1000);
+          } else if (xRateLimitReset) {
+            resetTimestamp = parseInt(xRateLimitReset, 10) * 1000;
+            waitTime = Math.max(0, Math.ceil((resetTimestamp - Date.now()) / 1000));
+          }
+          
+          if (resetTimestamp && waitTime !== null && waitTime > 0) {
+            const resetDate = new Date(resetTimestamp);
+            const resetTimeLocal = resetDate.toLocaleString('en-US', { 
+              hour: 'numeric',
+              minute: '2-digit',
+              second: '2-digit',
+              hour12: true,
+              timeZoneName: 'short'
+            });
+            const waitMinutes = Math.ceil(waitTime / 60);
+            throw new Error(`GitHub API rate limit exceeded. Rate limit resets at ${resetTimeLocal} (in ${waitMinutes} minute(s)).`);
+          } else {
+            const waitMinutes = 60;
+            throw new Error(`GitHub API rate limit exceeded. Waiting ${waitMinutes} minute(s) before trying again.`);
+          }
+        }
+      }
+      
+      const errorText = await response.text();
+      throw new Error(`GitHub API error: ${response.status} ${response.statusText} - ${errorText}`);
+    }
+
+    const pagePRs = (await response.json()) as GitHubPullRequest[];
+    if (pagePRs.length === 0) break;
+
+    pullRequests.push(...pagePRs);
+
+    if (pagePRs.length < perPage) break;
+    page++;
+  }
+
+  return pullRequests;
+}
+
+/**
+ * Find PRs that reference a specific issue number
+ * Checks PR title and body for issue references like "#106" or "fixes #106"
+ */
+export function findPRsForIssue(
+  pullRequests: GitHubPullRequest[],
+  issueNumber: number
+): GitHubPullRequest[] {
+  // Pattern to match issue references: #106, fixes #106, closes #106, etc.
+  const issuePattern = new RegExp(`#${issueNumber}\\b|(?:fixes?|closes?|resolves?|addresses?)\\s+#${issueNumber}\\b`, 'i');
+  
+  return pullRequests.filter(pr => {
+    // Check title
+    if (pr.title && issuePattern.test(pr.title)) {
+      return true;
+    }
+    // Check body
+    if (pr.body && issuePattern.test(pr.body)) {
+      return true;
+    }
+    return false;
+  });
+}
+
+/**
+ * Fetch pull request data by PR number
+ */
+export async function fetchPullRequest(
+  owner: string,
+  repo: string,
+  prNumber: number
+): Promise<GitHubPullRequest | null> {
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github.v3+json',
+  };
+  
+  // Add GitHub token if provided
+  if (GITHUB_TOKEN) {
+    headers.Authorization = `Bearer ${GITHUB_TOKEN}`;
+  }
+
+  try {
+    const url = `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}`;
+    const response = await fetch(url, { headers });
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        return null; // PR doesn't exist
+      }
+      
+      // Handle rate limiting
+      if (response.status === 403) {
+        const errorText = await response.text();
+        if (errorText.includes('rate limit')) {
+          const retryAfter = response.headers.get('Retry-After');
+          const xRateLimitReset = response.headers.get('X-RateLimit-Reset');
+          
+          let waitTime: number | null = null;
+          let resetTimestamp: number | null = null;
+          
+          if (retryAfter) {
+            waitTime = parseInt(retryAfter, 10);
+            resetTimestamp = Date.now() + (waitTime * 1000);
+          } else if (xRateLimitReset) {
+            resetTimestamp = parseInt(xRateLimitReset, 10) * 1000;
+            waitTime = Math.max(0, Math.ceil((resetTimestamp - Date.now()) / 1000));
+          }
+          
+          if (resetTimestamp && waitTime !== null && waitTime > 0) {
+            const resetDate = new Date(resetTimestamp);
+            const resetTimeLocal = resetDate.toLocaleString('en-US', { 
+              hour: 'numeric',
+              minute: '2-digit',
+              second: '2-digit',
+              hour12: true,
+              timeZoneName: 'short'
+            });
+            const waitMinutes = Math.ceil(waitTime / 60);
+            throw new Error(`GitHub API rate limit exceeded. Rate limit resets at ${resetTimeLocal} (in ${waitMinutes} minute(s)).`);
+          } else {
+            const waitMinutes = 60;
+            throw new Error(`GitHub API rate limit exceeded. Waiting ${waitMinutes} minute(s) before trying again.`);
+          }
+        }
+      }
+      
+      const errorText = await response.text();
+      throw new Error(`GitHub API error: ${response.status} ${response.statusText} - ${errorText}`);
+    }
+
+    return (await response.json()) as GitHubPullRequest;
+  } catch (error) {
+    // If it's a rate limit error, re-throw it
+    if (error instanceof Error && error.message.includes('rate limit')) {
+      throw error;
+    }
+    // For other errors, return null (PR might not exist or be accessible)
+    return null;
+  }
+}
+
+/**
+ * Extract PR number from a pull request URL
+ * Handles both API URLs and HTML URLs
+ */
+export function extractPrNumberFromUrl(prUrl: string): number | null {
+  // Match patterns like:
+  // - https://api.github.com/repos/owner/repo/pulls/123
+  // - https://github.com/owner/repo/pull/123
+  const match = prUrl.match(/\/pulls?\/(\d+)/);
+  if (match && match[1]) {
+    const prNumber = parseInt(match[1], 10);
+    if (!isNaN(prNumber)) {
+      return prNumber;
+    }
+  }
+  return null;
 }
 
 /**

@@ -8,6 +8,8 @@ import {
   getKanWorkspaceId,
   getListNames,
   getBoardName,
+  getBoardSlug,
+  getBoardVisibility,
   KAN_API_KEY,
 } from './config';
 import type { GitHubIssue, KanbnCard } from './types';
@@ -62,7 +64,6 @@ export async function kanbnRequest<T>(
   // Debug logging for failed requests
   const debugMode = process.env.DEBUG === 'true';
   if (debugMode) {
-    console.log(`[DEBUG] ${method} ${url}`);
   }
 
   const response = await fetch(url, {
@@ -230,6 +231,8 @@ export async function getOrCreateBoard(repoFullName: string): Promise<string> {
       listNames.BACKLOG,
       listNames.SELECTED,
       listNames.IN_PROGRESS,
+      listNames.READY_FOR_QA,
+      listNames.QUALITY_ASSURANCE,
       listNames.COMPLETED,
     ];
     
@@ -242,7 +245,38 @@ export async function getOrCreateBoard(repoFullName: string): Promise<string> {
       },
     });
     repoBoardCache.set(repoFullName, newBoard.publicId);
-    console.log(`[BOARD] Created board for ${repoFullName}: ${newBoard.publicId}`);
+    
+    // Update board with slug and visibility if configured (POST doesn't support these, so we update after creation)
+    const boardSlug = getBoardSlug(repoFullName);
+    const boardVisibility = getBoardVisibility(repoFullName);
+    
+    if (boardSlug || boardVisibility) {
+      try {
+        const updateBody: { slug?: string; visibility?: 'public' | 'private' } = {};
+        if (boardSlug) {
+          updateBody.slug = boardSlug;
+        }
+        if (boardVisibility) {
+          updateBody.visibility = boardVisibility;
+        }
+        
+        await kanbnRequest<{ publicId: string; name: string }>(`/boards/${newBoard.publicId}`, {
+          method: 'PUT',
+          body: updateBody,
+        });
+        
+        const updateParts: string[] = [];
+        if (boardSlug) updateParts.push(`slug: ${boardSlug}`);
+        if (boardVisibility) updateParts.push(`visibility: ${boardVisibility}`);
+        console.log(`[BOARD] Created board for ${repoFullName}: ${newBoard.publicId} (${updateParts.join(', ')})`);
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        console.warn(`[BOARD] Created board for ${repoFullName}: ${newBoard.publicId}, but failed to update slug/visibility: ${errorMsg}`);
+      }
+    } else {
+      console.log(`[BOARD] Created board for ${repoFullName}: ${newBoard.publicId}`);
+    }
+    
     return newBoard.publicId;
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
@@ -301,7 +335,14 @@ export async function getOrCreateLists(boardId: string, repoFullName: string): P
 
   // Create all required lists (if they don't exist)
   const listNames = getListNames();
-  const listOrder = [listNames.BACKLOG, listNames.SELECTED, listNames.IN_PROGRESS, listNames.COMPLETED];
+  const listOrder = [
+    listNames.BACKLOG,
+    listNames.SELECTED,
+    listNames.IN_PROGRESS,
+    listNames.READY_FOR_QA,
+    listNames.QUALITY_ASSURANCE,
+    listNames.COMPLETED,
+  ];
   for (let i = 0; i < listOrder.length; i++) {
     const listName = listOrder[i];
     
@@ -336,26 +377,56 @@ export async function getOrCreateLists(boardId: string, repoFullName: string): P
 
 /**
  * Determine which list an issue should be in based on its status
+ * 
+ * Priority order (matches workflow):
+ * 1. Closed → Completed
+ * 2. Has PR + PR has assignees/reviewers → Quality Assurance (PR exists and someone assigned for review/QA)
+ * 3. Has PR (not draft) → Ready for QA (PR exists, ready for review)
+ * 4. Has PR (draft) → In Progress (work in progress, PR is draft)
+ * 5. Has assignees (but no PR) → Selected (someone picked it up)
+ * 6. Everything else → Backlog
  */
-export function determineListForIssue(issue: GitHubIssue): string {
+export function determineListForIssue(
+  issue: GitHubIssue,
+  pullRequest?: { assignees: Array<{ login: string }>; requested_reviewers: Array<{ login: string }>; draft: boolean } | null
+): string {
   const listNames = getListNames();
   
-  // Closed issues go to Completed
+  // 1. Closed issues go to Completed
   if (issue.state === 'closed') {
     return listNames.COMPLETED;
   }
 
-  // Issues with associated PR (branch) go to In Progress
-  if (issue.pull_request && issue.pull_request.url) {
-    return listNames.IN_PROGRESS;
+  // 2. Issues with PR that has assignees or requested reviewers → Quality Assurance
+  // (PR exists and someone is assigned for review/QA)
+  if (pullRequest) {
+    const hasPrAssignees = pullRequest.assignees && pullRequest.assignees.length > 0;
+    const hasReviewers = pullRequest.requested_reviewers && pullRequest.requested_reviewers.length > 0;
+    
+    if (hasPrAssignees || hasReviewers) {
+      return listNames.QUALITY_ASSURANCE;
+    }
+    
+    // 3. PR exists but is draft → In Progress (work still in progress)
+    if (pullRequest.draft) {
+      return listNames.IN_PROGRESS;
+    }
+    
+    // 4. PR exists (not draft, no assignees) → Ready for QA
+    return listNames.READY_FOR_QA;
   }
 
-  // Assigned issues go to Selected
+  // 5. Has PR URL but we couldn't fetch PR data → Ready for QA (assume it's ready)
+  if (issue.pull_request && issue.pull_request.url) {
+    return listNames.READY_FOR_QA;
+  }
+
+  // 6. Assigned issues (but no PR) → Selected (someone picked it up)
   if (issue.assignees && issue.assignees.length > 0) {
     return listNames.SELECTED;
   }
 
-  // Everything else goes to Backlog
+  // 7. Everything else goes to Backlog
   return listNames.BACKLOG;
 }
 
@@ -490,15 +561,35 @@ export async function mapLabels(githubLabels: GitHubIssue['labels'], boardId: st
 }
 
 /**
+ * Delete a card by its public ID
+ */
+async function deleteCard(cardPublicId: string): Promise<void> {
+  try {
+    await kanbnRequest(`/cards/${cardPublicId}`, {
+      method: 'DELETE',
+    });
+    console.log(`[CARD] Successfully deleted duplicate card ${cardPublicId}`);
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    // Log the error but don't throw - the card might already be deleted or the API might not support DELETE
+    console.warn(`[CARD] Failed to delete card ${cardPublicId}: ${errorMsg}`);
+    // If DELETE is not supported, we might need to use a different approach
+    // For now, we'll just log the warning and continue
+  }
+}
+
+/**
  * Get all cards from a board
  * Returns a map of issue number -> card ID by matching GitHub URLs in descriptions or issue numbers in titles
  * Also fetches and caches existing labels from the board
+ * Automatically removes duplicate cards (keeps the one with correct format, deletes others)
  */
 export async function getAllBoardCards(
   boardId: string,
   repositoryUrl: string
 ): Promise<Map<number, { publicId: string; title: string; description?: string; listPublicId: string }>> {
   const cardMap = new Map<number, { publicId: string; title: string; description?: string; listPublicId: string }>();
+  const cardsByIssue = new Map<number, Array<{ publicId: string; title: string; description?: string; listPublicId: string }>>();
   
   try {
     // Get board with all cards and labels
@@ -536,13 +627,13 @@ export async function getAllBoardCards(
               }
             }
             
+            // Extract issue number from title prefix - we always format titles as "#123: Title"
+            // This is our primary and only reliable identifier
             let issueNumber: number | null = null;
             
-            // Method 1: Try to extract issue number from title prefix (e.g., "#42: " or "[#42] ")
-            // This is our primary matching method since we always prefix titles with issue number
             if (card.title) {
-              // Match patterns like: "#42: Title", "[#42] Title", "#42 - Title"
-              const titlePrefixMatch = card.title.match(/^[[#]?(\d+)[\]:\s-]/);
+              // Match pattern: "#123: " at the start of the title
+              const titlePrefixMatch = card.title.match(/^#(\d+):\s/);
               if (titlePrefixMatch && titlePrefixMatch[1]) {
                 const parsed = parseInt(titlePrefixMatch[1], 10);
                 if (!isNaN(parsed)) {
@@ -551,9 +642,9 @@ export async function getAllBoardCards(
               }
             }
             
-            // Method 2: Fallback - try to extract issue number from GitHub URL in description
+            // Fallback: If title doesn't have prefix, try GitHub URL in description
+            // (for cards created before we added the prefix)
             if (issueNumber === null && card.description) {
-              // Match pattern: https://github.com/owner/repo/issues/123
               const issueMatch = card.description.match(new RegExp(`${repositoryUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/issues/(\\d+)`));
               if (issueMatch && issueMatch[1]) {
                 const parsed = parseInt(issueMatch[1], 10);
@@ -563,29 +654,62 @@ export async function getAllBoardCards(
               }
             }
             
-            // Method 3: Last resort - try to extract issue number from anywhere in title
-            if (issueNumber === null && card.title) {
-              // Match pattern: "#123" anywhere in title
-              const titleMatch = card.title.match(/#(\d+)/);
-              if (titleMatch && titleMatch[1]) {
-                const parsed = parseInt(titleMatch[1], 10);
-                if (!isNaN(parsed)) {
-                  issueNumber = parsed;
-                }
-              }
-            }
-            
-            // If we found an issue number, add to map
+            // If we found an issue number, collect all cards for this issue
             if (issueNumber !== null) {
-              cardMap.set(issueNumber, {
+              const cardInfo = {
                 publicId: card.publicId,
                 title: card.title,
                 description: card.description,
                 listPublicId: card.listPublicId,
-              });
+              };
+              
+              if (!cardsByIssue.has(issueNumber)) {
+                cardsByIssue.set(issueNumber, []);
+              }
+              cardsByIssue.get(issueNumber)!.push(cardInfo);
             }
           }
         }
+      }
+    }
+    
+    // Process duplicates: keep the best card, delete others
+    const duplicatesToDelete: Array<{ issueNumber: number; cardPublicId: string; title: string }> = [];
+    
+    for (const [issueNumber, cards] of cardsByIssue.entries()) {
+      if (cards.length === 1) {
+        // Only one card for this issue - use it
+        cardMap.set(issueNumber, cards[0]);
+      } else {
+        // Multiple cards for the same issue - find the best one and mark others for deletion
+        // Prefer cards with correct title format "#123: Title"
+        const bestCard = cards.find(card => card.title.startsWith(`#${issueNumber}:`)) || cards[0];
+        
+        // Mark duplicates for deletion
+        const duplicates = cards.filter(card => card.publicId !== bestCard.publicId);
+        console.log(`[CARD] Found ${cards.length} card(s) for issue #${issueNumber}, keeping card ${bestCard.publicId} (title: "${bestCard.title}"), will delete ${duplicates.length} duplicate(s)`);
+        
+        for (const duplicate of duplicates) {
+          duplicatesToDelete.push({
+            issueNumber,
+            cardPublicId: duplicate.publicId,
+            title: duplicate.title,
+          });
+        }
+        
+        // Use the best card
+        cardMap.set(issueNumber, bestCard);
+      }
+    }
+    
+    // Delete all duplicates (after we've built the map, so we don't affect the map)
+    if (duplicatesToDelete.length > 0) {
+      console.log(`[CARD] Deleting ${duplicatesToDelete.length} duplicate card(s)...`);
+      for (const duplicate of duplicatesToDelete) {
+        console.log(`[CARD] Deleting duplicate card ${duplicate.cardPublicId} for issue #${duplicate.issueNumber} (title: "${duplicate.title}")`);
+        await deleteCard(duplicate.cardPublicId);
+        // Small delay between deletions to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
     }
     
@@ -608,13 +732,15 @@ export async function syncIssueCard(
   issue: GitHubIssue,
   repositoryUrl: string,
   repoFullName: string,
-  existingCard?: { publicId: string; title: string; description?: string; listPublicId: string }
+  existingCard?: { publicId: string; title: string; description?: string; listPublicId: string },
+  pullRequest?: { assignees: Array<{ login: string }>; requested_reviewers: Array<{ login: string }>; draft: boolean } | null,
+  recursionDepth: number = 0
 ): Promise<boolean> {
   const boardId = await getOrCreateBoard(repoFullName);
   const listMap = await getOrCreateLists(boardId, repoFullName);
   
-  // Determine which list this issue should be in
-  const targetListName = determineListForIssue(issue);
+  // Determine which list this issue should be in (using PR data if available)
+  const targetListName = determineListForIssue(issue, pullRequest);
   const targetListId = listMap.get(targetListName);
   
   if (!targetListId) {
@@ -626,7 +752,7 @@ export async function syncIssueCard(
   
   // Build card description with GitHub link and metadata
   const descriptionParts: string[] = [];
-  descriptionParts.push(`GitHub Issue: ${issue.html_url}`);
+  descriptionParts.push(`GitHub Issue: [${issue.html_url}](${issue.html_url})`);
   if (issue.user) {
     descriptionParts.push(`\nCreated by: [${issue.user.login}](${issue.user.html_url})`);
   }
@@ -637,16 +763,46 @@ export async function syncIssueCard(
   if (issue.body) {
     descriptionParts.push(`\n\n---\n\n${issue.body}`);
   }
-  const description = descriptionParts.join('');
+  let description = descriptionParts.join('');
+  
+  // Kanbn API has a 10000 character limit for descriptions
+  const MAX_DESCRIPTION_LENGTH = 10000;
+  if (description.length > MAX_DESCRIPTION_LENGTH) {
+    // Truncate the issue body (which is usually the longest part) to fit within the limit
+    const headerParts = descriptionParts.filter((_, i) => i < descriptionParts.length - 1);
+    const headerLength = headerParts.join('').length + '\n\n---\n\n'.length;
+    const truncationMessage = `\n\n... (truncated, original issue body was ${issue.body?.length || 0} characters)`;
+    const availableLength = MAX_DESCRIPTION_LENGTH - headerLength - truncationMessage.length - 10; // 10 chars buffer
+    
+    const truncatedBody = issue.body ? issue.body.substring(0, Math.max(0, availableLength)) : '';
+    
+    description = [
+      ...headerParts,
+      `\n\n---\n\n${truncatedBody}${truncationMessage}`
+    ].join('');
+    
+    // Final safety check - if still too long, truncate more aggressively
+    if (description.length > MAX_DESCRIPTION_LENGTH) {
+      const finalTruncation = MAX_DESCRIPTION_LENGTH - truncationMessage.length - 10;
+      description = description.substring(0, Math.max(0, finalTruncation)) + truncationMessage;
+    }
+  }
   
   // Prefix title with issue number for reliable matching
   const cardTitle = `#${issue.number}: ${issue.title}`;
   
   // Check if card needs updating
   const existingCardId = existingCard?.publicId;
+  
+  // Normalize descriptions for comparison (handle undefined/null)
+  const existingDescription = existingCard?.description || '';
+  const normalizedExistingDescription = existingDescription.trim();
+  const normalizedDescription = description.trim();
+  
+  // Check if card needs updating - always update labels to ensure they're in sync
   const needsUpdate = !existingCard || 
     existingCard.title !== cardTitle ||
-    existingCard.description !== description ||
+    normalizedExistingDescription !== normalizedDescription ||
     existingCard.listPublicId !== targetListId;
   
   if (!needsUpdate && existingCard) {
@@ -664,31 +820,64 @@ export async function syncIssueCard(
           description: description,
           listPublicId: targetListId,
           labelPublicIds: labelIds,
+          memberPublicIds: [], // Empty array - we don't assign members from GitHub issues
         },
       });
       
       // Log what changed
+      const changes: string[] = [];
       if (existingCard.title !== cardTitle) {
-        console.log(`[CARD] Updated title for issue #${issue.number} in ${repoFullName}`);
+        changes.push('title');
       }
-      if (existingCard.description !== description) {
-        console.log(`[CARD] Updated description for issue #${issue.number} in ${repoFullName}`);
+      if (normalizedExistingDescription !== normalizedDescription) {
+        changes.push('description');
       }
       if (existingCard.listPublicId !== targetListId) {
         const oldListName = Array.from(listMap.entries()).find(([_, id]) => id === existingCard.listPublicId)?.[0] || 'unknown';
-        console.log(`[CARD] Moved issue #${issue.number} in ${repoFullName} from "${oldListName}" to "${targetListName}"`);
+        changes.push(`moved from "${oldListName}" to "${targetListName}"`);
+      }
+      // Always update labels to ensure they're in sync with GitHub
+      changes.push('labels');
+      
+      if (changes.length > 0) {
+        console.log(`[CARD] Updated issue #${issue.number} "${issue.title}" in ${repoFullName}: ${changes.join(', ')}`);
       }
       
       return true;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error(`Failed to update card for issue #${issue.number}: ${errorMsg}`);
-      throw error;
+      
+      // If card was not found (404), it may have been deleted - check if another card exists first
+      if (errorMsg.includes('404') || errorMsg.includes('Not found')) {
+        // Before creating a new card, re-fetch all cards to see if there's already a card for this issue
+        // (the card might have been moved or we might have stale data)
+        // Note: This will also clean up duplicates if any exist
+        const refreshedCardsMap = await getAllBoardCards(boardId, repositoryUrl);
+        const existingCardForIssue = refreshedCardsMap.get(issue.number);
+        
+        if (existingCardForIssue && existingCardForIssue.publicId !== existingCardId && recursionDepth < 1) {
+          // Found a different card for this issue - that's the real card, update it
+          console.log(`[CARD] Card ${existingCardId} not found, but found card ${existingCardForIssue.publicId} for issue #${issue.number}, updating that instead`);
+          // Update the found card by calling syncIssueCard recursively with the correct card
+          // Limit recursion to 1 level to prevent infinite loops
+          return await syncIssueCard(issue, repositoryUrl, repoFullName, existingCardForIssue, pullRequest, recursionDepth + 1);
+        } else {
+          // No other card found - the card was deleted, create a new one
+          console.log(`[CARD] Card ${existingCardId} for issue #${issue.number} "${issue.title}" not found (may have been deleted), creating new card...`);
+          // Fall through to create new card
+        }
+      } else {
+        console.error(`Failed to update card for issue #${issue.number} "${issue.title}": ${errorMsg}`);
+        throw error;
+      }
     }
-  } else {
+  }
+  
+  // Create new card (either doesn't exist or update failed with 404)
+  {
     // Create new card
     try {
-      const card = await kanbnRequest<KanbnCard & { publicId: string }>('/cards', {
+      const card = await kanbnRequest<KanbnCard & { publicId?: string }>('/cards', {
         method: 'POST',
         body: {
           title: cardTitle,
@@ -696,14 +885,20 @@ export async function syncIssueCard(
           listPublicId: targetListId,
           position: 'end',
           labelPublicIds: labelIds,
+          memberPublicIds: [], // Required by API - empty array since we don't assign members from GitHub issues
         },
       });
       
-      console.log(`[CARD] Created card for issue #${issue.number} in ${repoFullName}: ${card.publicId}`);
+      // Note: The API may not return publicId in the response, so we handle it gracefully
+      if (card.publicId) {
+        console.log(`[CARD] Created card for issue #${issue.number} "${issue.title}" in ${repoFullName}: ${card.publicId}`);
+      } else {
+        console.log(`[CARD] Created card for issue #${issue.number} "${issue.title}" in ${repoFullName}`);
+      }
       return true;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error(`Failed to create card for issue #${issue.number}: ${errorMsg}`);
+      console.error(`Failed to create card for issue #${issue.number} "${issue.title}": ${errorMsg}`);
       throw error;
     }
   }

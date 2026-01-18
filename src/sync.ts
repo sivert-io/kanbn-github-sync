@@ -14,6 +14,10 @@ import {
 } from './kanbn';
 import {
   fetchGitHubIssues,
+  fetchPullRequest,
+  fetchAllPullRequests,
+  findPRsForIssue,
+  extractPrNumberFromUrl,
   getIssueKey,
 } from './github';
 import type { GitHubIssue } from './types';
@@ -115,6 +119,21 @@ export async function syncAllRepositories(): Promise<void> {
         }
       }
 
+      // Fetch all PRs once per repository to match them to issues
+      let allPRs: Awaited<ReturnType<typeof fetchAllPullRequests>> = [];
+      try {
+        allPRs = await fetchAllPullRequests(owner, repo, 'all');
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        if (errorMsg.includes('rate limit')) {
+          console.error(`[PHASE 2] GitHub API rate limit exceeded while fetching PRs. ${errorMsg}`);
+          // Continue without PR matching - issues will be processed without PR data
+        } else {
+          console.warn(`[PHASE 2] Failed to fetch PRs for ${repoFullName}: ${errorMsg}`);
+          // Continue without PR matching
+        }
+      }
+
       let created = 0;
       let updated = 0;
       let errors = 0;
@@ -125,7 +144,37 @@ export async function syncAllRepositories(): Promise<void> {
           const existingCard = existingCardsMap.get(issue.number);
           const hadCard = existingCard !== undefined || issueCardMap.has(issueKey);
           
-          const wasUpdated = await syncIssueCard(issue, repositoryUrl, repoFullName, existingCard);
+          // Find PR data for this issue:
+          // 1. The issue has an associated PR (pull_request field exists)
+          // 2. A PR references this issue (check PR title/body for #issueNumber)
+          // Note: We don't sync PRs themselves, only issues
+          let pullRequest = null;
+          const hasAssociatedPr = issue.pull_request && issue.pull_request.url;
+          
+          if (hasAssociatedPr) {
+            // The issue has an associated PR, extract PR number from URL
+            const prNumber = extractPrNumberFromUrl(issue.pull_request!.url);
+            if (prNumber) {
+              pullRequest = allPRs.find(pr => pr.number === prNumber);
+              if (!pullRequest) {
+                // PR not found in list, try fetching directly
+                try {
+                  pullRequest = await fetchPullRequest(owner, repo, prNumber);
+                } catch (error) {
+                  // Silently continue without PR data
+                }
+              }
+            }
+          } else {
+            // Check if any PR references this issue
+            const referencingPRs = findPRsForIssue(allPRs, issue.number);
+            if (referencingPRs.length > 0) {
+              // Use the first matching PR (usually there's only one)
+              pullRequest = referencingPRs[0];
+            }
+          }
+          
+          const wasUpdated = await syncIssueCard(issue, repositoryUrl, repoFullName, existingCard, pullRequest);
           
           if (!hadCard) {
             created++;
@@ -140,7 +189,7 @@ export async function syncAllRepositories(): Promise<void> {
           const errorMsg = error instanceof Error ? error.message : String(error);
           // Don't spam logs for rate limit errors if we're handling retries
           if (!errorMsg.includes('rate limit') || errorMsg.includes('after')) {
-            console.error(`[PHASE 2] ERROR: Failed to sync issue #${issue.number} from ${repoFullName}: ${errorMsg}`);
+            console.error(`[PHASE 2] ERROR: Failed to sync issue #${issue.number} "${issue.title}" from ${repoFullName}: ${errorMsg}`);
           }
           errors++;
           

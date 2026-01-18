@@ -2,6 +2,10 @@
  * Configuration management for Kanbn GitHub Sync
  */
 
+// Load environment variables FIRST (before reading process.env)
+import dotenv from 'dotenv';
+dotenv.config();
+
 import { readFileSync, watchFile } from 'fs';
 import { join } from 'path';
 import type { Config } from './types';
@@ -24,12 +28,16 @@ export const MIN_SYNC_INTERVAL_MINUTES = 5;
 
 // Cache for repo -> custom board names
 const repoBoardNames = new Map<string, string>();
+// Cache for repo -> board config (slug, visibility)
+const repoBoardConfig = new Map<string, { slug?: string; visibility?: 'public' | 'private' }>();
 
 // Default list names
 const DEFAULT_LIST_NAMES = {
   BACKLOG: '📝 Backlog',
   SELECTED: '✨ Selected',
   IN_PROGRESS: '⚙️ In Progress',
+  READY_FOR_QA: '✅ Ready for QA',
+  QUALITY_ASSURANCE: '🔍 Quality Assurance',
   COMPLETED: '🎉 Completed/Closed',
 };
 
@@ -112,11 +120,20 @@ export function getSyncIntervalMinutes(): number {
 /**
  * Get list names from config or use defaults
  */
-export function getListNames(): { BACKLOG: string; SELECTED: string; IN_PROGRESS: string; COMPLETED: string } {
+export function getListNames(): { 
+  BACKLOG: string; 
+  SELECTED: string; 
+  IN_PROGRESS: string; 
+  READY_FOR_QA: string;
+  QUALITY_ASSURANCE: string;
+  COMPLETED: string;
+} {
   return {
     BACKLOG: config.lists?.backlog || DEFAULT_LIST_NAMES.BACKLOG,
     SELECTED: config.lists?.selected || DEFAULT_LIST_NAMES.SELECTED,
     IN_PROGRESS: config.lists?.inProgress || DEFAULT_LIST_NAMES.IN_PROGRESS,
+    READY_FOR_QA: config.lists?.readyForQa || DEFAULT_LIST_NAMES.READY_FOR_QA,
+    QUALITY_ASSURANCE: config.lists?.qualityAssurance || DEFAULT_LIST_NAMES.QUALITY_ASSURANCE,
     COMPLETED: config.lists?.completed || DEFAULT_LIST_NAMES.COMPLETED,
   };
 }
@@ -139,10 +156,23 @@ export function getRepositories(): string[] {
     return repos;
   }
   
-  // If it's an object (key-value), extract keys and store custom names
+  // If it's an object (key-value), extract keys and store custom names/config
   const repoKeys = Object.keys(repos);
   repoKeys.forEach(repo => {
-    repoBoardNames.set(repo, repos[repo]);
+    const repoConfig = repos[repo];
+    if (typeof repoConfig === 'string') {
+      // Simple string format: "owner/repo": "Custom Board Name"
+      repoBoardNames.set(repo, repoConfig);
+    } else if (typeof repoConfig === 'object' && repoConfig !== null) {
+      // Full config format: "owner/repo": { "name": "...", "slug": "...", "visibility": "..." }
+      repoBoardNames.set(repo, repoConfig.name);
+      if (repoConfig.slug || repoConfig.visibility) {
+        repoBoardConfig.set(repo, {
+          slug: repoConfig.slug,
+          visibility: repoConfig.visibility,
+        });
+      }
+    }
   });
   return repoKeys;
 }
@@ -157,6 +187,25 @@ export function getBoardName(repoFullName: string): string {
   }
   // Default: "owner - repo"
   return repoFullName.replace('/', ' - ');
+}
+
+/**
+ * Get board slug for a repository (if configured)
+ */
+export function getBoardSlug(repoFullName: string): string | undefined {
+  return repoBoardConfig.get(repoFullName)?.slug;
+}
+
+/**
+ * Get board visibility for a repository (custom or default)
+ */
+export function getBoardVisibility(repoFullName: string): 'public' | 'private' | undefined {
+  const repoConfig = repoBoardConfig.get(repoFullName);
+  if (repoConfig?.visibility) {
+    return repoConfig.visibility;
+  }
+  // Return default visibility if set
+  return config.boards?.defaultVisibility;
 }
 
 /**
@@ -235,7 +284,9 @@ export function verifyConfig(): { valid: boolean; errors: string[]; hasPlacehold
     const repoConfig = config.github?.repositories;
     let hasPlaceholderBoardNames = false;
     if (repoConfig && typeof repoConfig === 'object' && !Array.isArray(repoConfig)) {
-      const boardNames = Object.values(repoConfig) as string[];
+      const boardNames = Object.values(repoConfig).map(val => 
+        typeof val === 'string' ? val : (typeof val === 'object' && val !== null ? val.name : '')
+      );
       hasPlaceholderBoardNames = boardNames.some(name => exampleBoardNames.includes(name));
     }
     

@@ -11,7 +11,12 @@ export interface Config {
     // Support both formats:
     // - Array: ["owner/repo"] (uses default board name "owner - repo")
     // - Object: { "owner/repo": "Custom Board Name" } (uses custom board name)
-    repositories?: string[] | Record<string, string>;
+    // - Object with full config: { "owner/repo": { "name": "Custom Board Name", "slug": "custom-slug", "visibility": "public" } }
+    repositories?: string[] | Record<string, string | { name: string; slug?: string; visibility?: 'public' | 'private' }>;
+  };
+  boards?: {
+    // Default visibility for all boards (if not specified per-repo)
+    defaultVisibility?: 'public' | 'private';
   };
   sync?: {
     intervalMinutes?: number;
@@ -20,6 +25,8 @@ export interface Config {
     backlog?: string;
     selected?: string;
     inProgress?: string;
+    readyForQa?: string;
+    qualityAssurance?: string;
     completed?: string;
   };
 }
@@ -46,6 +53,17 @@ export interface GitHubComment {
   updated_at: string;
 }
 
+export interface GitHubPullRequest {
+  number: number;
+  state: 'open' | 'closed';
+  draft: boolean;
+  assignees: Array<{ login: string }>;
+  requested_reviewers: Array<{ login: string }>;
+  html_url: string;
+  title?: string; // PR title (for matching to issues)
+  body?: string | null; // PR body (for matching to issues)
+}
+
 export interface KanbnCard {
   publicId?: string;
   title: string;
@@ -53,4 +71,5 @@ export interface KanbnCard {
   listPublicId: string;
   position?: 'start' | 'end' | number;
   labelPublicIds?: string[];
+  memberPublicIds?: string[];
 }

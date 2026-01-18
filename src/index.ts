@@ -5,7 +5,6 @@
  * Automatically syncs GitHub issues to Kanbn cards via polling
  */
 
-import dotenv from 'dotenv';
 import {
   loadConfig,
   isConfigLoaded,
@@ -26,9 +25,6 @@ import {
   fetchWorkspaceBySlug,
 } from './kanbn';
 import { syncAllRepositories } from './sync';
-
-// Load environment variables (for secrets)
-dotenv.config();
 
 // Initial config load
 const initialLoad = loadConfig();
@@ -449,8 +445,10 @@ async function initializeService(): Promise<void> {
   const listNames = getListNames();
   console.log('[SYNC] Issues are automatically assigned to lists based on status:');
   console.log(`[SYNC]   • Closed → ${listNames.COMPLETED}`);
-  console.log(`[SYNC]   • Has branch/PR → ${listNames.IN_PROGRESS}`);
-  console.log(`[SYNC]   • Assigned → ${listNames.SELECTED}`);
+  console.log(`[SYNC]   • Has PR + PR has assignees/reviewers → ${listNames.QUALITY_ASSURANCE}`);
+  console.log(`[SYNC]   • Has PR (not draft) → ${listNames.READY_FOR_QA}`);
+  console.log(`[SYNC]   • Has PR (draft) → ${listNames.IN_PROGRESS}`);
+  console.log(`[SYNC]   • Assigned (no PR) → ${listNames.SELECTED}`);
   console.log(`[SYNC]   • Otherwise → ${listNames.BACKLOG}`);
   
   // Set up config file watching for hot reload
