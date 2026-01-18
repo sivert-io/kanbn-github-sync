@@ -326,22 +326,90 @@ async function validateWorkspaceId(): Promise<{ valid: boolean; workspaces: Arra
 }
 
 /**
- * Verify configuration
+ * Verify configuration and detect placeholder values
  */
-function verifyConfig(): { valid: boolean; errors: string[] } {
+function verifyConfig(): { valid: boolean; errors: string[]; hasPlaceholders: boolean } {
   const errors: string[] = [];
-  if (!KAN_API_KEY) errors.push('KAN_API_KEY is required');
-  if (!KAN_BASE_URL) errors.push('kanbn.baseUrl is required in config.json');
-  if (!KAN_WORKSPACE_URL_SLUG) {
-    errors.push('kanbn.workspaceUrlSlug is required in config.json');
+  let hasPlaceholders = false;
+  
+  // Check for placeholder API key
+  if (!KAN_API_KEY) {
+    errors.push('KAN_API_KEY is required in .env');
+  } else {
+    // Check for exact example placeholder value
+    const exampleApiKey = 'kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx';
+    if (KAN_API_KEY === exampleApiKey || KAN_API_KEY.includes('xxxxxxxx')) {
+      errors.push('KAN_API_KEY in .env still contains placeholder value from env.example - please update with your actual API key');
+      hasPlaceholders = true;
+    } else if (!KAN_API_KEY.startsWith('kan_') || KAN_API_KEY.length < 40) {
+      // Basic validation: Kanbn API keys start with "kan_" and are typically 40+ characters
+      errors.push('KAN_API_KEY in .env does not appear to be a valid Kanbn API key format (should start with "kan_" and be 40+ characters)');
+    }
   }
   
+  // Check for placeholder base URL
+  if (!KAN_BASE_URL) {
+    errors.push('kanbn.baseUrl is required in config.json');
+  } else {
+    // Check for exact example value from config.json.example
+    const exampleBaseUrl = 'https://kan.example.com';
+    if (KAN_BASE_URL === exampleBaseUrl || KAN_BASE_URL.includes('example.com')) {
+      errors.push('kanbn.baseUrl in config.json still contains placeholder value from config.json.example - please update with your actual Kanbn URL');
+      hasPlaceholders = true;
+    }
+  }
+  
+  // Check for placeholder workspace slug
+  if (!KAN_WORKSPACE_URL_SLUG) {
+    errors.push('kanbn.workspaceUrlSlug is required in config.json');
+  } else {
+    // Check for common placeholder patterns (but "MAT" could be valid, so only check for obvious placeholders)
+    const lowerSlug = KAN_WORKSPACE_URL_SLUG.toLowerCase();
+    if (KAN_WORKSPACE_URL_SLUG === 'YOUR_WORKSPACE_SLUG' || 
+        lowerSlug.includes('your') || 
+        lowerSlug.includes('example') ||
+        lowerSlug.includes('placeholder')) {
+      errors.push('kanbn.workspaceUrlSlug in config.json still contains placeholder value - please update with your actual workspace slug');
+      hasPlaceholders = true;
+    }
+  }
+  
+  // Check for placeholder repositories
   const repos = getRepositories();
   if (repos.length === 0) {
     errors.push('github.repositories is required in config.json (array of "owner/repo" strings, or object with "owner/repo": "Custom Board Name")');
+  } else {
+    // Check if repositories contain placeholder values from config.json.example
+    const exampleRepos = ['your-username/repo-one', 'your-username/repo-two', 'your-username/repo-three'];
+    const exampleBoardNames = ['My Custom Board Name', 'Another Board', 'Third Repository'];
+    
+    // Check repository names
+    const placeholderRepos = repos.filter(repo => 
+      exampleRepos.includes(repo) ||
+      repo.includes('your-username') || 
+      (repo.includes('owner/') && (repo.includes('repo-one') || repo.includes('repo-two') || repo.includes('repo-three')))
+    );
+    
+    // Check board names (if repositories is an object)
+    const repoConfig = config.github?.repositories;
+    let hasPlaceholderBoardNames = false;
+    if (repoConfig && typeof repoConfig === 'object' && !Array.isArray(repoConfig)) {
+      const boardNames = Object.values(repoConfig) as string[];
+      hasPlaceholderBoardNames = boardNames.some(name => exampleBoardNames.includes(name));
+    }
+    
+    if (placeholderRepos.length > 0) {
+      errors.push(`github.repositories in config.json still contains placeholder values from config.json.example (${placeholderRepos.join(', ')}) - please update with your actual GitHub repositories`);
+      hasPlaceholders = true;
+    }
+    
+    if (hasPlaceholderBoardNames) {
+      errors.push('github.repositories in config.json still contains example board names from config.json.example - please update with your actual board names');
+      hasPlaceholders = true;
+    }
   }
   
-  return { valid: errors.length === 0, errors };
+  return { valid: errors.length === 0, errors, hasPlaceholders };
 }
 
 /**
@@ -1672,7 +1740,24 @@ async function initializeService(): Promise<void> {
   
   const configCheck = verifyConfig();
   
-  // If configuration is invalid
+  // If configuration contains placeholders, stop immediately with clear message
+  if (configCheck.hasPlaceholders) {
+    console.log('\n' + '='.repeat(60));
+    console.log('[CONFIG] ERROR: Configuration contains placeholder values!');
+    console.log('='.repeat(60));
+    console.log('\n[CONFIG] Please update the following with your actual values:\n');
+    configCheck.errors.forEach((error) => {
+      if (error.includes('placeholder')) {
+        console.log(`   ❌ ${error}`);
+      }
+    });
+    console.log('\n' + '='.repeat(60));
+    console.log('[KGS] Service stopped. Please fix configuration and restart.');
+    console.log('='.repeat(60) + '\n');
+    process.exit(1);
+  }
+  
+  // If configuration is invalid (missing required fields)
   if (!configCheck.valid) {
     console.log('\n[CONFIG] WARNING: Configuration incomplete:');
     configCheck.errors.forEach((error) => {

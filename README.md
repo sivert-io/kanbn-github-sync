@@ -26,7 +26,7 @@
 - Assigned issues → ✨ Selected
 - New issues → 📝 Backlog
 
-🔄 **Real-Time Sync** — Polls GitHub repositories every minute and syncs changes  
+🔄 **Real-Time Sync** — Polls GitHub repositories every 5 minutes (or 1 minute with GitHub token) and syncs changes  
 📊 **Status Tracking** — Cards automatically move between lists as issue status changes  
 🏷️ **Label Sync** — GitHub labels automatically synced to Kanbn labels  
 🚀 **Multi-Repository** — Sync multiple GitHub repositories simultaneously  
@@ -41,8 +41,7 @@
 
 ## ⚙️ Requirements
 
-- **Node.js 18+** (for native fetch support)
-- **Docker** and **Docker Compose** (optional, for containerized deployment) ([Install Docker](https://docs.docker.com/engine/install/))
+- **Docker** and **Docker Compose** ([Install Docker](https://docs.docker.com/engine/install/))
 - A running **Kanbn instance** (e.g., `https://kan.example.com`)
 - Your **Kanbn API key**
 
@@ -50,29 +49,7 @@
 
 ## 🚀 Quick Start
 
-Get up and running in minutes:
-
-1. **Install dependencies:**
-   ```bash
-   yarn install
-   ```
-
-2. **Configure:**
-   ```bash
-   cp config/env.example .env
-   cp config/config.json.example config/config.json
-   # Edit .env and config/config.json with your settings
-   ```
-
-3. **Start:**
-   ```bash
-   yarn start
-   ```
-
-
-### 🐳 Docker
-
-**Quick start with Docker Compose:**
+**Get up and running with Docker in minutes:**
 
 1. **Create a directory for your deployment:**
    ```bash
@@ -142,19 +119,7 @@ Get up and running in minutes:
    
    **Note:** Both `.env` and `config.json` must exist in the same directory as `docker-compose.yml` before starting docker-compose.
 
-**Using the included compose files:**
-
-**Production** (uses Docker Hub image):
-```bash
-cd docker
-docker-compose up -d
-```
-
-**Development** (builds from local source):
-```bash
-cd docker
-docker-compose -f docker-compose.dev.yml up -d
-```
+👉 **For local development or building from source, see [CONTRIBUTING.md](.github/CONTRIBUTING.md)**
 
 ---
 
@@ -162,77 +127,19 @@ docker-compose -f docker-compose.dev.yml up -d
 
 The service automatically creates boards and lists - you only need to configure:
 
-### Environment Variables (`.env`)
+**`.env`** (required in same directory as `docker-compose.yml`):
+- `KAN_API_KEY` - Your Kanbn API key (required)
+- `GITHUB_TOKEN` - GitHub token for higher rate limits (optional, supports both Classic PAT `ghp_...` and Fine-grained PAT `github_pat_...`)
 
-**Required:**
-- `KAN_API_KEY` - Your Kanbn API key (e.g., `kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`)
+**`config.json`** (required in same directory as `docker-compose.yml`):
+- `kanbn.baseUrl` - Your Kanbn instance URL
+- `kanbn.workspaceUrlSlug` - Your workspace slug (found in Kanbn Settings → Workspace URL)
+- `github.repositories` - Object mapping `"owner/repo"` to board names, or array for default naming
+- `sync.intervalMinutes` - Sync interval (default: 5 minutes, minimum: 5 without GitHub token)
+- `lists` - Custom list names (optional)
+- `server.port` - HTTP server port (optional, omit to run without HTTP server)
 
-**Optional:**
-- `GITHUB_TOKEN` - GitHub token for higher rate limits (5000 requests/hour vs 60 requests/hour)
-  - Without this, minimum sync interval is 5 minutes to avoid rate limits
-  - Supports both Classic PAT (`ghp_...`) and Fine-grained PAT (`github_pat_...`)
-  - Get your token from: https://github.com/settings/tokens
-
-Example `.env`:
-```bash
-# Required: Kanbn API key
-KAN_API_KEY=kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-# Optional: GitHub token (for higher rate limits)
-# GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-### Configuration File (`config/config.json`)
-
-**Required fields:**
-- `kanbn.baseUrl` - Your Kanbn instance URL (e.g., `https://kan.example.com`)
-- `kanbn.workspaceUrlSlug` - The workspace URL slug from your Kanbn settings (e.g., `"MAT"`)
-  - Found in Settings → Workspace URL
-  - Used to scope API calls to the correct workspace
-- `github.repositories` - Object mapping repository names to custom board names, or array for default naming
-
-**Optional fields:**
-- `sync.intervalMinutes` - How often to check for changes (default: 1 minute, minimum: 5 minutes without GitHub token)
-- `lists` - Custom list names (defaults provided below)
-- `server.port` - Port for HTTP server (default: 3001, omit to run without HTTP server)
-
-Example `config/config.json`:
-```json
-{
-  "kanbn": {
-    "baseUrl": "https://kan.example.com",
-    "workspaceUrlSlug": "MAT"
-  },
-  "github": {
-    "repositories": {
-      "owner/repo-one": "My Custom Board Name",
-      "owner/repo-two": "Another Board"
-    }
-  },
-  "sync": {
-    "intervalMinutes": 5
-  },
-  "lists": {
-    "backlog": "📝 Backlog",
-    "selected": "✨ Selected",
-    "inProgress": "⚙️ In Progress",
-    "completed": "🎉 Completed/Closed"
-  },
-  "server": {
-    "port": 3001
-  }
-}
-```
-
-**Note:** You can also use an array format for repositories (board names will default to `"owner - repo"`):
-```json
-"github": {
-  "repositories": [
-    "owner/repo-one",
-    "owner/repo-two"
-  ]
-}
-```
+👉 **See `config/env.example` and `config/config.json.example` for detailed examples and all available options.**
 
 
 ---
@@ -255,24 +162,21 @@ Issues are automatically assigned to the correct list based on their GitHub stat
 
 ## 🔧 Troubleshooting
 
-### Service won't start
-- Check that `KAN_API_KEY` is set in `.env`
-- Verify `kanbn.baseUrl` and `kanbn.workspaceUrlSlug` in `config/config.json`
+**Service won't start?**
+- Check that `.env` and `config.json` exist next to `docker-compose.yml`
+- Verify `KAN_API_KEY` in `.env` and `kanbn.baseUrl` + `kanbn.workspaceUrlSlug` in `config.json`
 - Ensure at least one repository is configured
+- Check logs: `docker-compose logs kgs` - service will stop if it detects placeholder values
 
-### Issues not syncing
-- Check service logs
-- Verify GitHub repository names are correct (format: `owner/repo`)
-- Check the `/health` endpoint: `curl http://localhost:3001/health`
+**Issues not syncing?**
+- Check service logs: `docker-compose logs -f kgs`
+- Verify repository names are correct (format: `owner/repo`)
+- Service syncs every 5 minutes by default (1 minute with `GITHUB_TOKEN`)
 
-### Rate limit errors
-- The service respects GitHub API rate limits (60 requests/hour unauthenticated)
-- Rate limit reset time is shown in error messages with your local timezone
-- If rate limited, the service will stop syncing remaining repos to avoid unnecessary API calls
-
-### Cards not updating
-- The service syncs every minute by default
-- Trigger manual sync: `POST http://localhost:3001/sync`
+**Rate limit errors?**
+- Without `GITHUB_TOKEN`: 60 requests/hour (minimum 5-minute interval enforced)
+- With `GITHUB_TOKEN`: 5000 requests/hour (can use shorter intervals)
+- Service stops syncing remaining repos if rate limit is hit
 
 ---
 
