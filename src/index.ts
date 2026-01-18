@@ -25,6 +25,23 @@ import {
   fetchWorkspaceBySlug,
 } from './kanbn';
 import { syncAllRepositories } from './sync';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
+// Read version from package.json
+function getVersion(): string {
+  try {
+    const packageJsonPath = join(__dirname, '../package.json');
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
+    return packageJson.version || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+// Print version at startup
+const VERSION = getVersion();
+console.log(`[KGS] Kanbn GitHub Sync v${VERSION}\n`);
 
 // Initial config load
 const initialLoad = loadConfig();

@@ -74,7 +74,7 @@
          - NODE_ENV=production
    ```
 
-3. **Create configuration files** (required - docker-compose needs these files to exist):
+3. **Create configuration files** (required - docker compose needs these files to exist):
    ```bash
    # Create .env file
    cat > .env << 'EOF'
@@ -112,10 +112,17 @@
 
 5. **Start the service:**
    ```bash
-   docker-compose up -d
+   docker compose up -d
    ```
    
-   **Note:** Both `.env` and `config.json` must exist in the same directory as `docker-compose.yml` before starting docker-compose.
+   **Note:** Both `.env` and `config.json` must exist in the same directory as `docker-compose.yml` before starting docker compose.
+   
+   **To force pull the latest version:**
+   ```bash
+   docker compose pull
+   docker compose up -d
+   ```
+   This pulls the latest image from Docker Hub before starting. Useful when updating to a new release.
 
 👉 **For local development or building from source, see [CONTRIBUTING.md](.github/CONTRIBUTING.md)**
 
@@ -163,10 +170,10 @@ Issues are automatically assigned to the correct list based on their GitHub stat
 - Check that `.env` and `config.json` exist next to `docker-compose.yml`
 - Verify `KAN_API_KEY` in `.env` and `kanbn.baseUrl` + `kanbn.workspaceUrlSlug` in `config.json`
 - Ensure at least one repository is configured
-- Check logs: `docker-compose logs kgs` - service will stop if it detects placeholder values
+- Check logs: `docker compose logs kgs` - service will stop if it detects placeholder values
 
 **Issues not syncing?**
-- Check service logs: `docker-compose logs -f kgs`
+- Check service logs: `docker compose logs -f kgs`
 - Verify repository names are correct (format: `owner/repo`)
 - Service syncs every 5 minutes by default (1 minute with `GITHUB_TOKEN`)
 

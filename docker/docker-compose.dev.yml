@@ -1,7 +1,7 @@
 version: '3.8'
 
 # Development compose file - builds from local source
-# Usage: docker-compose -f docker-compose.dev.yml up
+# Usage: docker compose -f docker-compose.dev.yml up
 
 services:
   kgs:

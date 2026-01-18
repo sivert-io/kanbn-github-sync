@@ -1,7 +1,7 @@
 version: '3.8'
 
 # Production compose file - uses image from Docker Hub
-# Usage: docker-compose up -d
+# Usage: docker compose up -d
 # Set DOCKER_IMAGE environment variable to use a specific image tag
 # Example: DOCKER_IMAGE=sivertio/kanbn-github-sync:v1.0.0 docker-compose up -d
 # Default: sivertio/kanbn-github-sync:latest
