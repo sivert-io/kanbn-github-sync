@@ -32,6 +32,11 @@
 🚀 **Multi-Repository** — Sync multiple GitHub repositories simultaneously  
 🎯 **One Board Per Repo** — Each repository gets its own dedicated Kanbn board  
 
+<div align="center">
+  <img src="assets/preview.png" alt="Kanbn GitHub Sync Preview" width="800">
+  <p><em>Automated GitHub issue synchronization with intelligent list assignment</em></p>
+</div>
+
 ---
 
 ## ⚙️ Requirements
@@ -85,18 +90,41 @@ docker-compose -f docker-compose.dev.yml up -d
 
 The service automatically creates boards and lists - you only need to configure:
 
-**`.env`** (secrets):
+### Environment Variables (`.env`)
+
+**Required:**
+- `KAN_API_KEY` - Your Kanbn API key (e.g., `kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`)
+
+**Optional:**
+- `GITHUB_TOKEN` - GitHub token for higher rate limits (5000 requests/hour vs 60 requests/hour)
+  - Without this, minimum sync interval is 5 minutes to avoid rate limits
+  - Supports both Classic PAT (`ghp_...`) and Fine-grained PAT (`github_pat_...`)
+  - Get your token from: https://github.com/settings/tokens
+
+Example `.env`:
 ```bash
 # Required: Kanbn API key
 KAN_API_KEY=kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
-# Optional: GitHub token (for higher rate limits: 5000 requests/hour vs 60 requests/hour)
-# Without this, minimum sync interval is 5 minutes to avoid rate limits
-# Supports both Classic PAT (ghp_...) and Fine-grained PAT (github_pat_...)
+# Optional: GitHub token (for higher rate limits)
 # GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-**`config/config.json`** (configuration):
+### Configuration File (`config/config.json`)
+
+**Required fields:**
+- `kanbn.baseUrl` - Your Kanbn instance URL (e.g., `https://kan.example.com`)
+- `kanbn.workspaceUrlSlug` - The workspace URL slug from your Kanbn settings (e.g., `"MAT"`)
+  - Found in Settings → Workspace URL
+  - Used to scope API calls to the correct workspace
+- `github.repositories` - Object mapping repository names to custom board names, or array for default naming
+
+**Optional fields:**
+- `sync.intervalMinutes` - How often to check for changes (default: 1 minute, minimum: 5 minutes without GitHub token)
+- `lists` - Custom list names (defaults provided below)
+- `server.port` - Port for HTTP server (default: 3001, omit to run without HTTP server)
+
+Example `config/config.json`:
 ```json
 {
   "kanbn": {
@@ -124,7 +152,16 @@ KAN_API_KEY=kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 }
 ```
 
-See [`config/README.md`](./config/README.md) for detailed configuration options.
+**Note:** You can also use an array format for repositories (board names will default to `"owner - repo"`):
+```json
+"github": {
+  "repositories": [
+    "owner/repo-one",
+    "owner/repo-two"
+  ]
+}
+```
+
 
 ---
 
