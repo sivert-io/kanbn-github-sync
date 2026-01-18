@@ -34,11 +34,11 @@ Cards automatically move between lists as issue status changes!
     "baseUrl": "https://kan.example.com"
   },
   "github": {
-    "repositories": [
-      "your-username/repo-one",
-      "your-username/repo-two",
-      "your-username/repo-three"
-    ]
+    "repositories": {
+      "your-username/repo-one": "My Custom Board Name",
+      "your-username/repo-two": "Another Board",
+      "your-username/repo-three": "Third Repository"
+    }
   },
   "sync": {
     "intervalMinutes": 1
@@ -49,11 +49,22 @@ Cards automatically move between lists as issue status changes!
 }
 ```
 
+**Note:** You can still use the array format for backward compatibility (board names will default to "owner - repo"):
+```json
+"github": {
+  "repositories": [
+    "your-username/repo-one",
+    "your-username/repo-two"
+  ]
+}
+```
+
 ### Fields
 
 **Required:**
 - `kanbn.baseUrl` - Your Kanbn instance URL
-- `github.repositories` - Array of repository names in "owner/repo" format
+- `kanbn.workspaceUrlSlug` - The workspace URL slug/identifier from your Kanbn settings (e.g., "MAT"). Found in Settings → Workspace URL. This is used to scope API calls.
+- `github.repositories` - Object mapping repository names to custom board names (`"owner/repo": "Board Name"`), or array of repository names for default naming (`"owner/repo"` → `"owner - repo"`)
 
 **Optional:**
 - `sync.intervalMinutes` - How often to check for changes (default: 1 minute)

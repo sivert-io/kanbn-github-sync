@@ -76,23 +76,44 @@ if ! git diff-index --quiet HEAD --; then
   fi
 fi
 
-# Build Docker image
-echo -e "${GREEN}Building Docker image...${NC}"
+# Docker Hub configuration (matches your convention: sivertio/kanbn-github-sync:latest)
+DOCKER_HUB_USER="${DOCKER_HUB_USER:-sivertio}"
+DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-kanbn-github-sync}"
+IMAGE_TAG="${DOCKER_HUB_USER}/${DOCKER_IMAGE_NAME}"
+LATEST_TAG="${IMAGE_TAG}:latest"
+VERSION_TAG="${IMAGE_TAG}:v${NEW_VERSION}"
+
+# Setup buildx for multi-platform builds
+echo -e "${GREEN}Setting up Docker buildx for multi-platform builds...${NC}"
+if ! docker buildx ls | grep -q "multiarch"; then
+  docker buildx create --name multiarch --use || docker buildx use multiarch
+else
+  docker buildx use multiarch
+fi
+docker buildx inspect --bootstrap
+
+# Build and push multi-platform Docker image
+echo -e "${GREEN}Building multi-platform Docker image (linux/amd64, linux/arm64)...${NC}"
 cd docker
-docker build -f Dockerfile \
-  -t kanbn-github-sync:latest \
-  -t kanbn-github-sync:v${NEW_VERSION} \
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -f Dockerfile \
+  -t "$LATEST_TAG" \
+  -t "$VERSION_TAG" \
+  --push \
   ..
 
 if [ $? -ne 0 ]; then
-  echo -e "${RED}Docker build failed${NC}"
-  # Restore package.json version
+  echo -e "${RED}Docker buildx build failed${NC}"
   cd ..
+  # Restore package.json version
   node -e "const fs=require('fs');const pkg=require('./package.json');pkg.version='$CURRENT_VERSION';fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\n')"
   exit 1
 fi
 
 cd ..
+
+echo -e "${GREEN}✓ Docker image built and pushed: ${LATEST_TAG}, ${VERSION_TAG}${NC}"
 
 # Commit version bump
 echo -e "${GREEN}Committing version bump...${NC}"
@@ -108,7 +129,9 @@ git tag -a "$TAG" -m "Release ${TAG}"
 echo -e "${GREEN}Release prepared successfully!${NC}"
 echo ""
 echo "Version bumped: ${CURRENT_VERSION} → ${NEW_VERSION}"
-echo "Docker image tagged: kanbn-github-sync:latest, kanbn-github-sync:${TAG}"
+echo "Docker images pushed to Docker Hub:"
+echo "  - ${LATEST_TAG}"
+echo "  - ${VERSION_TAG}"
 echo ""
 read -p "Push to remote and create GitHub release? (y/N) " -n 1 -r
 echo

@@ -8,7 +8,7 @@
 import dotenv from 'dotenv';
 import express, { Request, Response } from 'express';
 import fetch from 'node-fetch';
-import { readFileSync } from 'fs';
+import { readFileSync, watch, watchFile } from 'fs';
 import { join } from 'path';
 
 // Load environment variables (for secrets)
@@ -18,9 +18,13 @@ dotenv.config();
 interface Config {
   kanbn?: {
     baseUrl?: string;
+    workspaceUrlSlug?: string; // Workspace URL slug/identifier from settings (e.g., "MAT")
   };
   github?: {
-    repositories?: string[]; // Array of "owner/repo" strings
+    // Support both formats:
+    // - Array: ["owner/repo"] (uses default board name "owner - repo")
+    // - Object: { "owner/repo": "Custom Board Name" } (uses custom board name)
+    repositories?: string[] | Record<string, string>;
   };
   sync?: {
     intervalMinutes?: number;
@@ -32,32 +36,59 @@ interface Config {
 
 let config: Config = {};
 let configLoaded = false;
-try {
-  // Try config/ directory first, then root for backward compatibility
-  const configPath = join(process.cwd(), 'config/config.json');
-  let configFile: string;
+let configPath: string | null = null;
+
+/**
+ * Load configuration from config.json
+ */
+function loadConfig(): { success: boolean; error?: string } {
   try {
-    configFile = readFileSync(configPath, 'utf-8');
-  } catch {
-    // Fallback to root directory
-    const rootConfigPath = join(process.cwd(), 'config.json');
-    configFile = readFileSync(rootConfigPath, 'utf-8');
+    // Try config/ directory first, then root for backward compatibility
+    const configDirPath = join(process.cwd(), 'config/config.json');
+    let configFile: string;
+    let path: string;
+    
+    try {
+      configFile = readFileSync(configDirPath, 'utf-8');
+      path = configDirPath;
+    } catch {
+      // Fallback to root directory
+      const rootConfigPath = join(process.cwd(), 'config.json');
+      configFile = readFileSync(rootConfigPath, 'utf-8');
+      path = rootConfigPath;
+    }
+    
+    config = JSON.parse(configFile);
+    configPath = path;
+    configLoaded = true;
+    return { success: true };
+  } catch (error) {
+    // config.json doesn't exist or is invalid
+    configLoaded = false;
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    };
   }
-  config = JSON.parse(configFile);
-  configLoaded = true;
+}
+
+// Initial config load
+const initialLoad = loadConfig();
+if (initialLoad.success) {
   console.log('✅ Loaded configuration from config.json');
-} catch (error) {
-  // config.json doesn't exist or is invalid
-  configLoaded = false;
 }
 
 const app = express();
 
 // Configuration (secrets from .env, config from config.json)
 const KAN_API_KEY = process.env.KAN_API_KEY || '';
-const KAN_BASE_URL = config.kanbn?.baseUrl || '';
-const SYNC_INTERVAL_MINUTES = config.sync?.intervalMinutes || 1;
-const PORT = config.server?.port || 3001;
+let KAN_BASE_URL = config.kanbn?.baseUrl || '';
+let KAN_WORKSPACE_URL_SLUG = config.kanbn?.workspaceUrlSlug || '';
+// Will be resolved from slug at startup
+let KAN_WORKSPACE_ID = '';
+let SYNC_INTERVAL_MINUTES = config.sync?.intervalMinutes || 1;
+// HTTP server is optional - only start if port is configured
+const PORT = config.server?.port;
 
 // Middleware
 app.use(express.json());
@@ -71,6 +102,17 @@ interface GitHubIssue {
   html_url: string;
   assignees?: Array<{ login: string }>; // People assigned to the issue
   pull_request?: { url: string } | null; // If issue has associated PR (branch)
+  user?: { login: string; html_url: string }; // Issue creator/author
+  created_at?: string; // Issue creation date
+  updated_at?: string; // Issue last update date
+}
+
+interface GitHubComment {
+  id: number;
+  body: string;
+  user: { login: string; html_url: string };
+  created_at: string;
+  updated_at: string;
 }
 
 interface KanbnCard {
@@ -86,6 +128,26 @@ interface KanbnCard {
 const repoBoardCache = new Map<string, string>(); // repo -> boardId
 const repoListCache = new Map<string, Map<string, string>>(); // repo -> (listName -> listId)
 
+// Sync interval timer (for reloading config)
+let syncIntervalTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Start or restart the sync interval timer
+ */
+function startSyncInterval(): void {
+  // Clear existing interval if any
+  if (syncIntervalTimer) {
+    clearInterval(syncIntervalTimer);
+  }
+  
+  const intervalMs = SYNC_INTERVAL_MINUTES * 60 * 1000;
+  syncIntervalTimer = setInterval(() => {
+    syncAllRepositories().catch((error) => {
+      console.error('Scheduled sync failed:', error);
+    });
+  }, intervalMs);
+}
+
 // Standard list names
 const LIST_NAMES = {
   BACKLOG: '📝 Backlog',
@@ -94,11 +156,45 @@ const LIST_NAMES = {
   COMPLETED: '🎉 Completed/Closed',
 } as const;
 
+// Cache for repo -> custom board names
+const repoBoardNames = new Map<string, string>(); // repo -> custom board name
+
 /**
  * Get list of configured repositories
  */
 function getRepositories(): string[] {
-  return config.github?.repositories || [];
+  const repos = config.github?.repositories;
+  if (!repos) return [];
+  
+  // If it's an array, return as-is
+  if (Array.isArray(repos)) {
+    // Store default board names for backward compatibility
+    repos.forEach(repo => {
+      if (!repoBoardNames.has(repo)) {
+        repoBoardNames.set(repo, repo.replace('/', ' - '));
+      }
+    });
+    return repos;
+  }
+  
+  // If it's an object (key-value), extract keys and store custom names
+  const repoKeys = Object.keys(repos);
+  repoKeys.forEach(repo => {
+    repoBoardNames.set(repo, repos[repo]);
+  });
+  return repoKeys;
+}
+
+/**
+ * Get board name for a repository (custom name or default)
+ */
+function getBoardName(repoFullName: string): string {
+  // Check if we have a custom name cached
+  if (repoBoardNames.has(repoFullName)) {
+    return repoBoardNames.get(repoFullName)!;
+  }
+  // Default: "owner - repo"
+  return repoFullName.replace('/', ' - ');
 }
 
 /**
@@ -109,28 +205,128 @@ function isRepoConfigured(repoFullName: string): boolean {
 }
 
 /**
+ * Fetch workspace by slug (by searching in all workspaces)
+ */
+async function fetchWorkspaceBySlug(slug: string): Promise<{ publicId: string; name: string; slug?: string } | null> {
+  try {
+    // Fetch all workspaces and find the one with matching slug
+    const workspaces = await fetchWorkspaces();
+    const workspace = workspaces.find(w => w.slug === slug);
+    return workspace || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * Fetch available workspaces from Kanbn
+ */
+async function fetchWorkspaces(): Promise<Array<{ publicId: string; name: string; slug?: string }>> {
+  try {
+    // The /workspaces endpoint returns an array of { role, workspace } objects
+    const workspaceItems = await kanbnRequest<Array<{ 
+      role: string; 
+      workspace: { publicId: string; name: string; slug?: string; description?: string; plan?: string } 
+    }>>('/workspaces');
+    
+    // Extract the workspace objects from the response
+    return workspaceItems.map(item => ({
+      publicId: item.workspace.publicId,
+      name: item.workspace.name,
+      slug: item.workspace.slug,
+    }));
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    // Check if it's a 500 error from the API
+    if (errorMsg.includes('500 Internal Server Error')) {
+      console.error('❌ Kanbn API returned a 500 Internal Server Error when fetching workspaces.');
+      console.error('   This is a server-side error from your Kanbn instance.');
+      console.error('   Please check:');
+      console.error('   • Is your Kanbn instance running and accessible?');
+      console.error('   • Is your API key valid and has proper permissions?');
+      console.error('   • Check your Kanbn server logs for more details');
+    } else {
+      console.error('Failed to fetch workspaces:', errorMsg);
+    }
+    return [];
+  }
+}
+
+/**
+ * Resolve workspace slug to workspace ID
+ */
+async function resolveWorkspaceId(): Promise<string | null> {
+  if (!KAN_WORKSPACE_URL_SLUG) {
+    return null; // No workspace URL slug provided
+  }
+  
+  // Fetch workspace by slug and get its ID
+  const workspace = await fetchWorkspaceBySlug(KAN_WORKSPACE_URL_SLUG);
+  if (workspace) {
+    return workspace.publicId;
+  }
+  
+  return null; // Invalid slug
+}
+
+/**
+ * Validate workspace slug and return available workspaces if invalid/missing
+ */
+async function validateWorkspaceId(): Promise<{ valid: boolean; workspaces: Array<{ publicId: string; name: string; slug?: string }>; resolvedId?: string }> {
+  const workspaces = await fetchWorkspaces();
+  
+  // Resolve workspace slug to actual ID
+  const resolvedId = await resolveWorkspaceId();
+  
+  if (!resolvedId) {
+    return { valid: false, workspaces };
+  }
+
+  // Validate that the resolved ID exists in the workspace list
+  const workspaceExists = workspaces.some(w => w.publicId === resolvedId);
+  
+  if (!workspaceExists && workspaces.length > 0) {
+    return { valid: false, workspaces, resolvedId };
+  }
+  
+  return { valid: true, workspaces, resolvedId };
+}
+
+/**
  * Verify configuration
  */
 function verifyConfig(): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
   if (!KAN_API_KEY) errors.push('KAN_API_KEY is required');
   if (!KAN_BASE_URL) errors.push('kanbn.baseUrl is required in config.json');
+  if (!KAN_WORKSPACE_URL_SLUG) {
+    errors.push('kanbn.workspaceUrlSlug is required in config.json');
+  }
   
   const repos = getRepositories();
   if (repos.length === 0) {
-    errors.push('github.repositories is required in config.json (array of "owner/repo" strings)');
+    errors.push('github.repositories is required in config.json (array of "owner/repo" strings, or object with "owner/repo": "Custom Board Name")');
   }
   
   return { valid: errors.length === 0, errors };
 }
 
 /**
- * Make authenticated request to Kanbn API
+ * Make authenticated request to Kanbn API with rate limiting and retry logic
  */
 async function kanbnRequest<T>(
   endpoint: string,
-  options: { method?: string; body?: unknown } = {}
+  options: { method?: string; body?: unknown } = {},
+  retryCount = 0
 ): Promise<T> {
+  // Rate limiting: ensure minimum delay between requests
+  const now = Date.now();
+  const timeSinceLastRequest = now - lastRequestTime;
+  if (timeSinceLastRequest < MIN_REQUEST_DELAY_MS) {
+    await new Promise(resolve => setTimeout(resolve, MIN_REQUEST_DELAY_MS - timeSinceLastRequest));
+  }
+  lastRequestTime = Date.now();
+
   // Ensure endpoint starts with /api/v1 if it's a relative path
   let apiEndpoint = endpoint;
   if (!endpoint.startsWith('http') && !endpoint.startsWith('/api/v1')) {
@@ -145,15 +341,54 @@ async function kanbnRequest<T>(
     'x-api-key': KAN_API_KEY,
   };
 
+  const method = options.method || 'GET';
+  
+  // Debug logging for failed requests
+  const debugMode = process.env.DEBUG === 'true';
+  if (debugMode) {
+    console.log(`[DEBUG] ${method} ${url}`);
+  }
+
   const response = await fetch(url, {
-    method: options.method || 'GET',
+    method,
     headers,
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`Kanbn API error: ${response.status} ${response.statusText} - ${errorText}`);
+    let errorMsg = errorText;
+    try {
+      const errorJson = JSON.parse(errorText);
+      errorMsg = errorJson.message || errorText;
+    } catch {
+      // If not JSON, use raw text
+    }
+
+    // Handle rate limiting and 500 errors (500 often indicates rate limiting on Kanbn API)
+    const isRateLimit = (response.status === 401 && errorMsg.includes('Rate limit')) || response.status === 429;
+    const isServerError = response.status === 500;
+    
+    if (isRateLimit || isServerError) {
+      const maxRetries = 5;
+      if (retryCount < maxRetries) {
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+        const backoffMs = Math.pow(2, retryCount) * 1000;
+        const errorType = isServerError ? 'Server error (likely rate limited)' : 'Rate limit';
+        console.warn(`⏳ ${errorType}, retrying in ${backoffMs / 1000}s... (attempt ${retryCount + 1}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        return kanbnRequest<T>(endpoint, options, retryCount + 1);
+      } else {
+        const errorType = isServerError ? 'Server errors (likely rate limited)' : 'Rate limit';
+        throw new Error(`Kanbn API ${errorType} exceeded after ${maxRetries} retries. Please wait before trying again.`);
+      }
+    }
+
+    const fullErrorMsg = `Kanbn API error: ${method} ${url} → ${response.status} ${response.statusText} - ${errorText}`;
+    if (debugMode || response.status !== 404) {
+      console.error(`[ERROR] ${fullErrorMsg}`);
+    }
+    throw new Error(fullErrorMsg);
   }
 
   return response.json() as Promise<T>;
@@ -165,41 +400,122 @@ const labelCache = new Map<string, Map<string, string>>();
 // Track issue number -> card ID mapping (repo#issue -> cardId)
 const issueCardMap = new Map<string, string>(); // "owner/repo#123" -> "card_abc"
 
+// Rate limiting: track last request time and enforce minimum delay between requests
+let lastRequestTime = 0;
+const MIN_REQUEST_DELAY_MS = 100; // Minimum 100ms between requests (10 requests/second max)
+
 /**
  * Get or ensure board exists for a repository (create if needed)
+ * Prevents duplicates by always checking for existing boards first
  */
 async function getOrCreateBoard(repoFullName: string): Promise<string> {
   // Check cache first
   if (repoBoardCache.has(repoFullName)) {
-    return repoBoardCache.get(repoFullName)!;
+    const cachedBoardId = repoBoardCache.get(repoFullName);
+    // Don't return 'failed' markers
+    if (cachedBoardId && cachedBoardId !== 'failed') {
+      return cachedBoardId;
+    }
   }
 
-  // Try to find existing board by name (sanitized repo name)
-  const boardName = repoFullName.replace('/', ' - ');
-  try {
-    const boards = await kanbnRequest<Array<{ publicId: string; name: string }>>('/boards');
-    const existingBoard = boards.find((b) => b.name === boardName);
-    if (existingBoard) {
-      repoBoardCache.set(repoFullName, existingBoard.publicId);
-      return existingBoard.publicId;
+  // Get board name (custom or default)
+  const boardName = getBoardName(repoFullName);
+  
+  // Always try to fetch boards first to check for existing board (with retries for 500 errors)
+  // This prevents duplicates even if previous fetch failed
+  let existingBoard: { publicId: string; name: string } | undefined;
+  const maxRetries = 5;
+  
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // Use workspace-scoped endpoint if workspace ID is configured
+      const boardsEndpoint = KAN_WORKSPACE_ID 
+        ? `/workspaces/${KAN_WORKSPACE_ID}/boards`
+        : '/boards';
+      const boards = await kanbnRequest<Array<{ publicId: string; name: string }>>(boardsEndpoint);
+      existingBoard = boards.find((b) => b.name === boardName);
+      if (existingBoard) {
+        repoBoardCache.set(repoFullName, existingBoard.publicId);
+        console.log(`✅ Found existing board for ${repoFullName}: ${existingBoard.publicId}`);
+        return existingBoard.publicId;
+      }
+      break; // Board doesn't exist, proceed to creation
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      // Retry on 500 errors (likely rate limiting)
+      if (errorMsg.includes('500 Internal Server Error') && attempt < maxRetries - 1) {
+        const backoffMs = Math.pow(2, attempt) * 1000;
+        console.warn(`  ⏳ Server error when fetching boards for ${repoFullName}, retrying in ${backoffMs / 1000}s...`);
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        continue;
+      }
+      // For other errors, log but continue (might create duplicate if board exists, but better than failing completely)
+      if (!errorMsg.includes('404') && attempt === 0) {
+        console.warn(`⚠️  Could not fetch boards to check for duplicates: ${errorMsg}`);
+      }
+      break; // Exit retry loop
     }
-  } catch (error) {
-    console.warn(`Failed to search for existing board for ${repoFullName}:`, error);
   }
 
   // Board doesn't exist, create it
+  // The API requires both lists and labels arrays when creating a board
   try {
-    const newBoard = await kanbnRequest<{ publicId: string; name: string }>('/boards', {
+    // Use workspace-scoped endpoint if workspace ID is configured
+    const boardsEndpoint = KAN_WORKSPACE_ID 
+      ? `/workspaces/${KAN_WORKSPACE_ID}/boards`
+      : '/boards';
+    
+    // Define the default lists that should be created with the board
+    // The API expects an array of list names (strings), not objects
+    const defaultLists = [
+      LIST_NAMES.BACKLOG,
+      LIST_NAMES.SELECTED,
+      LIST_NAMES.IN_PROGRESS,
+      LIST_NAMES.COMPLETED,
+    ];
+    
+    const newBoard = await kanbnRequest<{ publicId: string; name: string }>(boardsEndpoint, {
       method: 'POST',
       body: {
         name: boardName,
+        lists: defaultLists,
+        labels: [], // Start with empty labels array
       },
     });
     repoBoardCache.set(repoFullName, newBoard.publicId);
     console.log(`✅ Created board for ${repoFullName}: ${newBoard.publicId}`);
     return newBoard.publicId;
   } catch (error) {
-    throw new Error(`Failed to create board for ${repoFullName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    
+    // If creation failed because board already exists, try to fetch it again
+    if (errorMsg.includes('already exists') || errorMsg.includes('duplicate') || errorMsg.includes('unique constraint')) {
+      console.warn(`⚠️  Board "${boardName}" may already exist, searching for it...`);
+      
+      // Retry fetching boards once more to find the existing board
+      try {
+        const boardsEndpoint = KAN_WORKSPACE_ID 
+          ? `/workspaces/${KAN_WORKSPACE_ID}/boards`
+          : '/boards';
+        const boards = await kanbnRequest<Array<{ publicId: string; name: string }>>(boardsEndpoint);
+        const foundBoard = boards.find((b) => b.name === boardName);
+        if (foundBoard) {
+          repoBoardCache.set(repoFullName, foundBoard.publicId);
+          console.log(`✅ Found existing board for ${repoFullName} (was created meanwhile): ${foundBoard.publicId}`);
+          return foundBoard.publicId;
+        }
+      } catch (fetchError) {
+        // If fetch fails again, continue to throw original error
+      }
+    }
+    
+    console.error(`❌ Failed to create board for ${repoFullName}. Check API permissions and endpoint.`);
+    const boardsEndpoint = KAN_WORKSPACE_ID 
+      ? `/workspaces/${KAN_WORKSPACE_ID}/boards`
+      : '/boards';
+    console.error(`   URL being called: ${KAN_BASE_URL}/api/v1${boardsEndpoint}`);
+    console.error(`   Error: ${errorMsg}`);
+    throw new Error(`Failed to create board for ${repoFullName}: ${errorMsg}`);
   }
 }
 
@@ -290,44 +606,51 @@ async function getOrCreateLabel(boardId: string, labelName: string, labelColor?:
     return boardCache.get(labelName) || null;
   }
 
+  // Initialize cache for this board if needed
+  if (!boardCache) {
+    labelCache.set(boardId, new Map());
+  }
+  const cache = labelCache.get(boardId)!;
+
+  // Note: The Kanbn API doesn't have a GET endpoint for board labels
+  // We'll just create labels as needed without fetching first
+  // Labels can also be created when creating the board (in the labels array)
+  // See: https://docs.kan.bn/api-reference/labels/create-a-label
+  
+  // Label doesn't exist, create it
   try {
-    // Fetch all labels for the board
-    const labels = await kanbnRequest<Array<{ publicId: string; name: string; color?: string }>>(
-      `/boards/${boardId}/labels`
-    );
-
-    // Initialize cache for this board if needed
-    if (!boardCache) {
-      labelCache.set(boardId, new Map());
+    // Convert color format if provided (GitHub uses #RRGGBB or RRGGBB, Kanbn expects exactly 7 chars with #)
+    let colourCode = labelColor || '#808080'; // Default gray if no color provided
+    
+    // Ensure it's exactly 7 characters: if it's 6 chars (no #), add #; if it's already 7, use as-is
+    if (colourCode.length === 6 && !colourCode.startsWith('#')) {
+      colourCode = `#${colourCode}`;
+    } else if (colourCode.length !== 7 || !colourCode.startsWith('#')) {
+      // If it's not 7 chars or doesn't start with #, use default
+      colourCode = '#808080';
     }
-    const cache = labelCache.get(boardId)!;
+    
+    // Use /labels endpoint (not /boards/{boardId}/labels)
+    // See: https://docs.kan.bn/api-reference/labels/create-a-label
+    const newLabel = await kanbnRequest<{ publicId: string; name: string; colourCode: string }>('/labels', {
+      method: 'POST',
+      body: {
+        name: labelName,
+        boardPublicId: boardId,
+        colourCode: colourCode, // Must be exactly 7 characters (e.g., "#808080")
+      },
+    });
 
-    // Look for existing label by name
-    const existingLabel = labels.find((l) => l.name.toLowerCase() === labelName.toLowerCase());
-    if (existingLabel) {
-      cache.set(labelName, existingLabel.publicId);
-      return existingLabel.publicId;
-    }
-
-    // Label doesn't exist, create it
-    try {
-      const newLabel = await kanbnRequest<{ publicId: string; name: string }>(`/boards/${boardId}/labels`, {
-        method: 'POST',
-        body: {
-          name: labelName,
-          color: labelColor || '#808080', // Default gray if no color provided
-        },
-      });
-
-      cache.set(labelName, newLabel.publicId);
-      console.log(`✅ Created new label: ${labelName} (${newLabel.publicId})`);
-      return newLabel.publicId;
-    } catch (error) {
-      console.warn(`Failed to create label "${labelName}":`, error);
-      return null;
-    }
+    cache.set(labelName, newLabel.publicId);
+    console.log(`✅ Created new label: ${labelName} (${newLabel.publicId})`);
+    return newLabel.publicId;
   } catch (error) {
-    console.error(`Failed to fetch labels for board ${boardId}:`, error);
+    // If label already exists or creation fails, try to continue without it
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    // Don't spam logs for expected errors (like duplicate labels)
+    if (!errorMsg.includes('already exists') && !errorMsg.includes('duplicate')) {
+      console.warn(`Failed to create label "${labelName}":`, errorMsg);
+    }
     return null;
   }
 }
@@ -368,32 +691,116 @@ async function syncIssueCard(
     throw new Error(`List "${targetListName}" not found for board ${boardId}`);
   }
 
-  // Check if card already exists
+  // Check if card already exists (in memory cache)
   const issueKey = getIssueKey(repoFullName, issue.number);
-  const existingCardId = issueCardMap.get(issueKey);
+  let existingCardId = issueCardMap.get(issueKey);
 
   const githubUrl = `${repositoryUrl}/issues/${issue.number}`;
+  
+  // If not in memory cache, try to find existing card by searching board
+  // This prevents duplicates when service restarts
+  if (!existingCardId) {
+    try {
+      existingCardId = await findExistingCardByGitHubUrl(boardId, githubUrl);
+      if (existingCardId) {
+        // Cache it for future lookups
+        issueCardMap.set(issueKey, existingCardId);
+        console.log(`  🔍 Found existing card for issue #${issue.number} (cache restored)`);
+      }
+    } catch (error) {
+      // If search fails, continue with card creation (might create duplicate, but better than failing)
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      if (!errorMsg.includes('500')) {
+        console.warn(`  ⚠️  Could not search for existing card: ${errorMsg}`);
+      }
+    }
+  }
   let description = issue.body || 'No description provided.';
+  
+  // Add issue metadata
+  const metadata: string[] = [];
+  if (issue.user) {
+    metadata.push(`👤 **Author:** [@${issue.user.login}](${issue.user.html_url})`);
+  }
+  if (issue.created_at) {
+    const createdDate = new Date(issue.created_at).toLocaleDateString();
+    metadata.push(`📅 **Created:** ${createdDate}`);
+  }
+  if (issue.updated_at && issue.updated_at !== issue.created_at) {
+    const updatedDate = new Date(issue.updated_at).toLocaleDateString();
+    metadata.push(`🔄 **Updated:** ${updatedDate}`);
+  }
+  if (issue.assignees && issue.assignees.length > 0) {
+    const assigneeList = issue.assignees.map(a => `@${a.login}`).join(', ');
+    metadata.push(`👥 **Assigned:** ${assigneeList}`);
+  }
+  
+  if (metadata.length > 0) {
+    description += `\n\n---\n${metadata.join(' | ')}`;
+  }
+  
   description += `\n\n---\n🔗 [View on GitHub](${githubUrl}) | Issue #${issue.number}`;
+  
+  // Truncate description if it exceeds 10000 characters (Kanbn API limit)
+  const MAX_DESCRIPTION_LENGTH = 10000;
 
   // Map labels
   const labelIds = await mapLabels(issue.labels, boardId);
+  
+  // Fetch comments to include count in description
+  let commentCount = 0;
+  try {
+    const [owner, repo] = repoFullName.split('/');
+    if (owner && repo) {
+      const comments = await fetchGitHubIssueComments(owner, repo, issue.number);
+      commentCount = comments.length;
+    }
+  } catch (error) {
+    // Silently fail - comments are optional
+  }
+  
+  // Add comment count to description if there are comments
+  if (commentCount > 0) {
+    description += `\n\n💬 **Comments:** ${commentCount} comment(s) on GitHub`;
+  }
+  
+  // Truncate description if it exceeds 10000 characters (Kanbn API limit)
+  if (description.length > MAX_DESCRIPTION_LENGTH) {
+    const truncated = description.substring(0, MAX_DESCRIPTION_LENGTH - 100);
+    description = truncated + `\n\n... (truncated, original length: ${description.length} characters)`;
+  }
 
-  const cardData: Partial<KanbnCard> = {
+  // Card creation requires labelPublicIds and memberPublicIds as arrays (even if empty)
+  // See: https://docs.kan.bn/api-reference/cards/create-a-card
+  const cardData: Partial<KanbnCard> & { 
+    labelPublicIds: string[];
+    memberPublicIds: string[];
+  } = {
     title: issue.title,
     description,
     listPublicId: targetListId,
     position: 'end',
-    ...(labelIds.length > 0 && { labelPublicIds: labelIds }),
+    labelPublicIds: labelIds, // Required field - always include array
+    memberPublicIds: [], // Required field - always include empty array
   };
+
+  let cardPublicId: string;
 
   if (existingCardId) {
     // Update existing card (including moving to correct list)
+    // Note: Update endpoint doesn't require labelPublicIds/memberPublicIds
+    // See: https://docs.kan.bn/api-reference/cards/update-a-card
     try {
+      const updateData: Partial<KanbnCard> = {
+        title: issue.title,
+        description,
+        listPublicId: targetListId,
+      };
       await kanbnRequest<KanbnCard>(`/cards/${existingCardId}`, {
         method: 'PUT',
-        body: cardData,
+        body: updateData,
       });
+      cardPublicId = existingCardId;
       console.log(`✅ Updated card for issue #${issue.number}: ${issue.title} → ${targetListName}`);
     } catch (error) {
       console.error(`Failed to update card for issue #${issue.number}:`, error);
@@ -401,19 +808,178 @@ async function syncIssueCard(
     }
   } else {
     // Create new card
+    // Note: Create endpoint REQUIRES labelPublicIds and memberPublicIds as arrays
+    // See: https://docs.kan.bn/api-reference/cards/create-a-card
     try {
       const card = await kanbnRequest<KanbnCard & { publicId: string }>('/cards', {
         method: 'POST',
-        body: cardData as KanbnCard,
+        body: cardData,
       });
       issueCardMap.set(issueKey, card.publicId);
+      cardPublicId = card.publicId;
       console.log(`✅ Created card for issue #${issue.number}: ${issue.title} → ${targetListName}`);
     } catch (error) {
       console.error(`Failed to create card for issue #${issue.number}:`, error);
       throw error;
     }
   }
+  
+  // Log comment count if we fetched it
+  if (commentCount > 0) {
+    console.log(`  💬 Issue #${issue.number} has ${commentCount} comment(s)`);
+  }
 }
+
+/**
+ * Find existing card in board by searching for GitHub URL in card descriptions
+ * This prevents duplicate card creation when service restarts
+ * Note: This is a best-effort search - if it fails, we'll create a new card (may be duplicate)
+ */
+async function findExistingCardByGitHubUrl(boardId: string, githubUrl: string): Promise<string | null> {
+  try {
+    // Try to use workspace search endpoint if available
+    if (KAN_WORKSPACE_ID) {
+      try {
+        // Use workspace search to find cards matching the GitHub URL
+        // Search query format may vary by API - try a simple text search
+        const searchEndpoint = `/workspaces/${KAN_WORKSPACE_ID}/search`;
+        const searchResults = await kanbnRequest<{
+          cards?: Array<{ publicId: string; title: string; description?: string }>;
+        }>(`${searchEndpoint}?q=${encodeURIComponent(githubUrl)}`);
+        
+        if (searchResults.cards && searchResults.cards.length > 0) {
+          // Find exact match by checking description contains the full GitHub URL
+          const matchingCard = searchResults.cards.find(card =>
+            card.description && card.description.includes(githubUrl)
+          );
+          
+          if (matchingCard) {
+            return matchingCard.publicId;
+          }
+        }
+      } catch (searchError) {
+        // Search endpoint might not exist or work differently - continue with fallback
+        // Don't log - this is expected if search isn't available
+      }
+    }
+    
+    // Fallback: Try to get board and search through lists (limited to avoid too many API calls)
+    // This is less efficient but works if search endpoint isn't available
+    try {
+      const board = await kanbnRequest<{ 
+        lists: Array<{ publicId: string; name: string }>;
+      }>(`/boards/${boardId}`);
+      
+      if (!board.lists || board.lists.length === 0) {
+        return null;
+      }
+      
+      // Only search the first 4 lists (our default lists: Backlog, Selected, In Progress, Completed)
+      // This avoids too many API calls while covering most cases
+      const listsToSearch = board.lists.slice(0, 4);
+      
+      for (const list of listsToSearch) {
+        try {
+          // Try to get cards from list (API might support this)
+          // If this endpoint doesn't exist, it will fail and we'll continue
+          const listCards = await kanbnRequest<{
+            cards?: Array<{ publicId: string; title: string; description?: string }>;
+          }>(`/lists/${list.publicId}/cards`);
+          
+          if (listCards.cards && listCards.cards.length > 0) {
+            const matchingCard = listCards.cards.find(card =>
+              card.description && card.description.includes(githubUrl)
+            );
+            
+            if (matchingCard) {
+              return matchingCard.publicId;
+            }
+          }
+        } catch (error) {
+          // Endpoint might not exist - skip this list and continue
+          continue;
+        }
+      }
+    } catch (error) {
+      // Board fetch failed - return null
+      return null;
+    }
+    
+    return null; // No matching card found
+  } catch (error) {
+    // Any error - return null (will create new card, might be duplicate but that's better than failing)
+    return null;
+  }
+}
+
+/**
+ * Fetch comments from a GitHub issue
+ */
+async function fetchGitHubIssueComments(
+  owner: string,
+  repo: string,
+  issueNumber: number
+): Promise<GitHubComment[]> {
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github.v3+json',
+  };
+
+  const comments: GitHubComment[] = [];
+  let page = 1;
+  const perPage = 100;
+
+  while (true) {
+    const url = `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=${perPage}&page=${page}`;
+    const response = await fetch(url, { headers });
+
+    if (!response.ok) {
+      // 404 means no comments, which is fine
+      if (response.status === 404) {
+        break;
+      }
+      
+      // Handle rate limiting
+      if (response.status === 403) {
+        const errorText = await response.text();
+        if (errorText.includes('rate limit')) {
+          const retryAfter = response.headers.get('Retry-After');
+          const xRateLimitReset = response.headers.get('X-RateLimit-Reset');
+          
+          let waitTime: number | null = null;
+          if (retryAfter) {
+            waitTime = parseInt(retryAfter, 10);
+          } else if (xRateLimitReset) {
+            const resetTimestamp = parseInt(xRateLimitReset, 10) * 1000;
+            waitTime = Math.max(0, Math.ceil((resetTimestamp - Date.now()) / 1000));
+          }
+          
+          const waitMinutes = waitTime !== null && waitTime > 0 ? Math.ceil(waitTime / 60) : 60;
+          const waitSeconds = waitTime !== null && waitTime > 0 ? waitTime % 60 : 0;
+          // Show more precise wait time if less than 60 minutes
+          if (waitSeconds > 0 && waitMinutes < 60) {
+            throw new Error(`GitHub API rate limit exceeded. Waiting ${waitMinutes} minute(s) and ${waitSeconds} second(s) before trying again.`);
+          } else {
+            throw new Error(`GitHub API rate limit exceeded. Waiting ${waitMinutes} minute(s) before trying again.`);
+          }
+        }
+      }
+      
+      const errorText = await response.text();
+      throw new Error(`GitHub API error: ${response.status} ${response.statusText} - ${errorText}`);
+    }
+
+    const pageComments = (await response.json()) as GitHubComment[];
+    if (pageComments.length === 0) break;
+
+    comments.push(...pageComments);
+
+    if (pageComments.length < perPage) break;
+    page++;
+  }
+
+  return comments;
+}
+
 
 /**
  * Fetch all issues from a GitHub repository (including closed for status tracking)
@@ -437,6 +1003,40 @@ async function fetchGitHubIssues(
 
     if (!response.ok) {
       const errorText = await response.text();
+      
+      // Handle rate limiting with helpful message
+      if (response.status === 403 && errorText.includes('rate limit')) {
+        // Try to get Retry-After header (seconds until reset)
+        const retryAfter = response.headers.get('Retry-After');
+        const xRateLimitReset = response.headers.get('X-RateLimit-Reset');
+        
+        let waitTime: number | null = null;
+        let waitMessage = '';
+        
+        if (retryAfter) {
+          waitTime = parseInt(retryAfter, 10);
+        } else if (xRateLimitReset) {
+          const resetTimestamp = parseInt(xRateLimitReset, 10) * 1000; // Convert to milliseconds
+          waitTime = Math.max(0, Math.ceil((resetTimestamp - Date.now()) / 1000)); // Seconds until reset
+        }
+        
+        if (waitTime !== null && waitTime > 0) {
+          const waitMinutes = Math.ceil(waitTime / 60);
+          const waitSeconds = waitTime % 60;
+          // Show more precise wait time (e.g., "55 minutes and 30 seconds" or just "55 minutes")
+          if (waitSeconds > 0 && waitMinutes < 60) {
+            waitMessage = ` Waiting ${waitMinutes} minute(s) and ${waitSeconds} second(s) before trying again.`;
+          } else {
+            waitMessage = ` Waiting ${waitMinutes} minute(s) before trying again.`;
+          }
+        } else {
+          // Default to 60 minutes if we can't determine wait time
+          waitMessage = ` Rate limit resets hourly. Waiting 60 minutes before trying again.`;
+        }
+        
+        throw new Error(`GitHub API rate limit exceeded.${waitMessage}`);
+      }
+      
       throw new Error(`GitHub API error: ${response.status} ${response.statusText} - ${errorText}`);
     }
 
@@ -473,7 +1073,17 @@ async function syncAllRepositories(): Promise<void> {
     return;
   }
 
-  console.log(`\n[${new Date().toISOString()}] Starting sync for ${repos.length} repositories...`);
+  const now = new Date();
+  const timeStr = now.toLocaleString('en-US', { 
+    year: 'numeric', 
+    month: 'short', 
+    day: 'numeric', 
+    hour: '2-digit', 
+    minute: '2-digit', 
+    second: '2-digit',
+    hour12: false 
+  });
+  console.log(`\n[${timeStr}] Starting sync for ${repos.length} repositories...`);
 
   for (const repoFullName of repos) {
     try {
@@ -485,8 +1095,38 @@ async function syncAllRepositories(): Promise<void> {
 
       console.log(`Syncing ${repoFullName}...`);
       const repositoryUrl = `https://github.com/${repoFullName}`;
+      
+      // Ensure board and lists exist even if there are no issues
+      try {
+        const boardId = await getOrCreateBoard(repoFullName);
+        await getOrCreateLists(boardId, repoFullName);
+        console.log(`✅ Board and lists ready for ${repoFullName}`);
+      } catch (error) {
+        console.error(`Failed to ensure board/lists exist for ${repoFullName}:`, error);
+      }
+      
       // Fetch all issues (open and closed) to track status changes
-      const issues = await fetchGitHubIssues(owner, repo, 'all');
+      let issues: GitHubIssue[] = [];
+      try {
+        issues = await fetchGitHubIssues(owner, repo, 'all');
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        if (errorMsg.includes('rate limit')) {
+          // Extract wait time from error message if available
+          const waitMatch = errorMsg.match(/Waiting (\d+) minute/);
+          if (waitMatch) {
+            const waitMinutes = waitMatch[1];
+            console.error(`⏳ GitHub API rate limit exceeded. Waiting ${waitMinutes} minute(s) before trying again.`);
+          } else {
+            console.error(`⏳ ${errorMsg}`);
+          }
+          // Stop syncing other repos if we hit rate limit
+          console.log(`⏸️  Stopping sync - rate limit reached. Remaining repositories will be skipped.`);
+          break; // Exit the loop, don't try other repos
+        } else {
+          throw error; // Re-throw non-rate-limit errors
+        }
+      }
 
       let created = 0;
       let updated = 0;
@@ -504,19 +1144,45 @@ async function syncAllRepositories(): Promise<void> {
           } else {
             created++;
           }
+          
+          // Small delay between issues to avoid overwhelming the API (100ms between issues, ~200ms total per issue with kanbnRequest delay)
+          await new Promise(resolve => setTimeout(resolve, 100));
         } catch (error) {
-          console.error(`Failed to sync issue #${issue.number} from ${repoFullName}`, error);
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          // Don't spam logs for rate limit errors if we're handling retries
+          if (!errorMsg.includes('rate limit') || errorMsg.includes('after')) {
+            console.error(`Failed to sync issue #${issue.number} from ${repoFullName}`, errorMsg);
+          }
           errors++;
+          
+          // If rate limited, add extra delay before continuing
+          if (errorMsg.includes('rate limit')) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
         }
       }
 
       console.log(`✅ ${repoFullName}: ${created} created, ${updated} updated, ${errors} errors`);
     } catch (error) {
-      console.error(`Failed to sync repository ${repoFullName}`, error);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      // For rate limit errors, we already logged a helpful message above
+      if (!errorMsg.includes('rate limit')) {
+        console.error(`Failed to sync repository ${repoFullName}:`, errorMsg);
+      }
     }
   }
 
-  console.log(`Sync completed at ${new Date().toISOString()}\n`);
+  const completedTime = new Date();
+  const completedTimeStr = completedTime.toLocaleString('en-US', { 
+    year: 'numeric', 
+    month: 'short', 
+    day: 'numeric', 
+    hour: '2-digit', 
+    minute: '2-digit', 
+    second: '2-digit',
+    hour12: false 
+  });
+  console.log(`Sync completed at ${completedTimeStr}\n`);
 }
 
 // Routes
@@ -585,9 +1251,21 @@ app.post('/sync', async (req: Request, res: Response) => {
           } else {
             created++;
           }
+          
+          // Small delay between issues to avoid overwhelming the API
+          await new Promise(resolve => setTimeout(resolve, 100));
         } catch (error) {
-          console.error(`Failed to sync issue #${issue.number}`, error);
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          // Don't spam logs for rate limit errors if we're handling retries
+          if (!errorMsg.includes('rate limit') || errorMsg.includes('after')) {
+            console.error(`Failed to sync issue #${issue.number}`, errorMsg);
+          }
           errors++;
+          
+          // If rate limited, add extra delay before continuing
+          if (errorMsg.includes('rate limit')) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
         }
       }
 
@@ -627,8 +1305,12 @@ app.post('/sync', async (req: Request, res: Response) => {
  */
 app.get('/boards', async (_req: Request, res: Response) => {
   try {
+    // Use workspace-scoped endpoint if workspace ID is configured
+    const boardsEndpoint = KAN_WORKSPACE_ID 
+      ? `/workspaces/${KAN_WORKSPACE_ID}/boards`
+      : '/boards';
     const boards = await kanbnRequest<Array<{ publicId: string; name: string; slug?: string }>>(
-      '/boards'
+      boardsEndpoint
     );
 
     return res.status(200).json({
@@ -693,14 +1375,22 @@ app.get('/labels/:boardPublicId', async (req: Request, res: Response) => {
   }
 });
 
-// Start server
-app.listen(PORT, async () => {
+// Initialize and start the service
+async function initializeService(): Promise<void> {
   const repos = getRepositories();
   
   console.log('='.repeat(60));
   console.log('Kanbn GitHub Sync (KGS)');
   console.log('='.repeat(60));
-  console.log(`Server running on port ${PORT}`);
+  
+  if (PORT) {
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  } else {
+    console.log('Running without HTTP server (polling only)');
+  }
+  
   console.log(`Kanbn URL: ${KAN_BASE_URL || 'Not configured'}`);
   
   // Check if config.json exists
@@ -723,10 +1413,174 @@ app.listen(PORT, async () => {
     configCheck.errors.forEach((error) => {
       console.log(`   - ${error}`);
     });
+    
+    // If workspace ID/slug is missing, try to fetch and list available workspaces
+    if (configCheck.errors.some(e => e.includes('workspace'))) {
+      console.log('\n🔍 Fetching available workspaces...');
+      try {
+        const workspaces = await fetchWorkspaces();
+        if (workspaces.length > 0) {
+          console.log('\n📋 Available workspaces:');
+          workspaces.forEach((workspace) => {
+            if (workspace.slug) {
+              console.log(`   - ${workspace.name} (slug: ${workspace.slug})`);
+            } else {
+              console.log(`   - ${workspace.name}`);
+            }
+          });
+          console.log('\n💡 Update config/config.json:');
+          console.log('   "kanbn": {');
+          console.log('     "baseUrl": "...",');
+          if (workspaces[0].slug) {
+            console.log(`     "workspaceUrlSlug": "${workspaces[0].slug}"`);
+          } else {
+            console.log(`     "workspaceUrlSlug": "${workspaces[0].publicId}"`);
+          }
+          console.log('   }');
+        } else {
+          console.log('   ⚠️  No workspaces found or unable to fetch workspaces.');
+          console.log('   Make sure your API key has permission to list workspaces.');
+        }
+      } catch (error) {
+        console.log(`   ⚠️  Failed to fetch workspaces: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    }
+    
     console.log('\n' + '='.repeat(60));
     console.log('⏸️  Service started but not syncing. Fix configuration errors above.');
     console.log('='.repeat(60));
     return;
+  }
+  
+  // Resolve workspace ID from URL slug (with retries for 500 errors)
+  console.log(`\n🔍 Resolving workspace URL slug "${KAN_WORKSPACE_URL_SLUG}" to ID...`);
+  let resolvedId: string | null = null;
+  let workspaceResolved = false;
+  const maxWorkspaceRetries = 5;
+  
+  for (let attempt = 0; attempt < maxWorkspaceRetries; attempt++) {
+    try {
+      resolvedId = await resolveWorkspaceId();
+      if (resolvedId) {
+        workspaceResolved = true;
+        break;
+      }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      // Retry on 500 errors (likely rate limiting)
+      if (errorMsg.includes('500 Internal Server Error') && attempt < maxWorkspaceRetries - 1) {
+        const backoffMs = Math.pow(2, attempt) * 1000;
+        console.warn(`   ⏳ Server error (likely rate limited), retrying in ${backoffMs / 1000}s... (attempt ${attempt + 1}/${maxWorkspaceRetries})`);
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        continue;
+      }
+      // For other errors or final attempt, break and show error
+      break;
+    }
+  }
+  
+  if (workspaceResolved && resolvedId) {
+    KAN_WORKSPACE_ID = resolvedId;
+    console.log(`✅ Resolved workspace: ${KAN_WORKSPACE_URL_SLUG} → ${KAN_WORKSPACE_ID}`);
+  } else {
+    console.log(`❌ Failed to resolve workspace URL slug "${KAN_WORKSPACE_URL_SLUG}"`);
+    // Try to fetch workspaces list (with retries)
+    let workspaces: Array<{ publicId: string; name: string; slug?: string }> = [];
+    for (let attempt = 0; attempt < maxWorkspaceRetries; attempt++) {
+      try {
+        workspaces = await fetchWorkspaces();
+        if (workspaces.length > 0) break;
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        if (errorMsg.includes('500 Internal Server Error') && attempt < maxWorkspaceRetries - 1) {
+          const backoffMs = Math.pow(2, attempt) * 1000;
+          await new Promise(resolve => setTimeout(resolve, backoffMs));
+          continue;
+        }
+        break;
+      }
+    }
+    
+    if (workspaces.length > 0) {
+      console.log('\n📋 Available workspaces:');
+      workspaces.forEach((workspace) => {
+        const currentMarker = workspace.slug === KAN_WORKSPACE_URL_SLUG 
+          ? ' ← (currently configured)' : '';
+        if (workspace.slug) {
+          console.log(`   - ${workspace.name} (slug: ${workspace.slug})${currentMarker}`);
+        } else {
+          console.log(`   - ${workspace.name}${currentMarker}`);
+        }
+      });
+      console.log('\n💡 Update config/config.json with a valid workspaceUrlSlug from the list above.');
+    }
+    console.log('\n' + '='.repeat(60));
+    console.log('⏸️  Service started but not syncing. Fix workspace configuration above.');
+    console.log('='.repeat(60));
+    return;
+  }
+  
+  // Validate workspace slug (double-check after resolution, with retries)
+  let workspaceValidation: { valid: boolean; workspaces: Array<{ publicId: string; name: string; slug?: string }>; resolvedId?: string } = { valid: false, workspaces: [] };
+  let validationRetries = 0;
+  const maxValidationRetries = 5;
+  
+  while (validationRetries < maxValidationRetries) {
+    try {
+      workspaceValidation = await validateWorkspaceId();
+      if (workspaceValidation.valid && workspaceValidation.resolvedId) {
+        break; // Validation successful
+      }
+      // If invalid but no 500 error, don't retry
+      if (!workspaceValidation.valid) {
+        break;
+      }
+      // If we got here and valid is false, increment and retry (unlikely but safe)
+      validationRetries++;
+      if (validationRetries >= maxValidationRetries) break;
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      // Retry on 500 errors only
+      if (errorMsg.includes('500 Internal Server Error') && validationRetries < maxValidationRetries - 1) {
+        const backoffMs = Math.pow(2, validationRetries) * 1000;
+        console.warn(`   ⏳ Server error during validation (likely rate limited), retrying in ${backoffMs / 1000}s...`);
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        validationRetries++;
+        continue;
+      }
+      // For other errors, use empty validation result
+      workspaceValidation = { valid: false, workspaces: [] };
+      break;
+    }
+  }
+  
+  if (!workspaceValidation.valid || !workspaceValidation.resolvedId) {
+    console.log('\n⚠️  Invalid workspace slug configured!');
+    console.log(`   Current workspace URL slug: ${KAN_WORKSPACE_URL_SLUG}`);
+    if (workspaceValidation.workspaces.length > 0) {
+      console.log('\n📋 Available workspaces:');
+      workspaceValidation.workspaces.forEach((workspace) => {
+        const currentMarker = workspace.slug === KAN_WORKSPACE_URL_SLUG 
+          ? ' ← (currently configured)' : '';
+        if (workspace.slug) {
+          console.log(`   - ${workspace.name} (slug: ${workspace.slug})${currentMarker}`);
+        } else {
+          console.log(`   - ${workspace.name}${currentMarker}`);
+        }
+      });
+      console.log('\n💡 Update config/config.json with a valid workspaceUrlSlug from the list above.');
+    } else {
+      console.log('   ⚠️  Unable to fetch available workspaces. Please check your API key permissions.');
+    }
+    console.log('\n' + '='.repeat(60));
+    console.log('⏸️  Service started but not syncing. Fix workspace configuration above.');
+    console.log('='.repeat(60));
+    return;
+  }
+  
+  // Ensure workspace ID is set from resolved ID
+  if (workspaceValidation.resolvedId) {
+    KAN_WORKSPACE_ID = workspaceValidation.resolvedId;
   }
   
   // Configuration is valid, proceed with normal startup
@@ -734,7 +1588,9 @@ app.listen(PORT, async () => {
   if (repos.length > 0) {
     console.log(`Configured repositories (${repos.length}):`);
     repos.forEach((repo) => {
-      console.log(`  - ${repo} (boards and lists will be created automatically)`);
+      const boardName = getBoardName(repo);
+      const customNameNote = boardName !== repo.replace('/', ' - ') ? ` → "${boardName}"` : '';
+      console.log(`  - ${repo}${customNameNote} (boards and lists will be created automatically)`);
     });
   } else {
     console.log('⚠️  No repositories configured. Add repositories to github.repositories in config.json');
@@ -747,12 +1603,7 @@ app.listen(PORT, async () => {
   });
 
   // Set up polling interval
-  const intervalMs = SYNC_INTERVAL_MINUTES * 60 * 1000;
-  setInterval(() => {
-    syncAllRepositories().catch((error) => {
-      console.error('Scheduled sync failed:', error);
-    });
-  }, intervalMs);
+  startSyncInterval();
 
   console.log(`✅ Polling started - will sync every ${SYNC_INTERVAL_MINUTES} minutes`);
   console.log('   Issues are automatically assigned to lists based on status:');
@@ -760,4 +1611,106 @@ app.listen(PORT, async () => {
   console.log('   • Has branch/PR → ⚙️ In Progress');
   console.log('   • Assigned → ✨ Selected');
   console.log('   • Otherwise → 📝 Backlog');
+  
+  // Set up config file watching for hot reload
+  if (configPath) {
+    setupConfigWatcher();
+  }
+}
+
+// Start the service
+initializeService().catch((error) => {
+  console.error('Failed to initialize service:', error);
+  process.exit(1);
 });
+
+/**
+ * Reload configuration from config.json
+ */
+async function reloadConfig(): Promise<void> {
+  console.log('\n🔄 Reloading configuration...');
+  
+  const oldWorkspaceUrlSlug = KAN_WORKSPACE_URL_SLUG;
+  const oldSyncInterval = SYNC_INTERVAL_MINUTES;
+  
+  // Reload config file
+  const reloadResult = loadConfig();
+  if (!reloadResult.success) {
+    console.error(`❌ Failed to reload config: ${reloadResult.error}`);
+    return;
+  }
+  
+  // Update configuration variables
+  KAN_BASE_URL = config.kanbn?.baseUrl || '';
+  KAN_WORKSPACE_URL_SLUG = config.kanbn?.workspaceUrlSlug || '';
+  const newSyncInterval = config.sync?.intervalMinutes || 1;
+  
+  // Check if workspace URL slug changed
+  if (KAN_WORKSPACE_URL_SLUG !== oldWorkspaceUrlSlug) {
+    console.log(`   Workspace URL slug changed: ${oldWorkspaceUrlSlug || 'none'} → ${KAN_WORKSPACE_URL_SLUG}`);
+    
+    // Clear workspace-related caches
+    repoBoardCache.clear();
+    repoListCache.clear();
+    labelCache.clear();
+    
+    // Re-resolve workspace ID
+    const resolvedId = await resolveWorkspaceId();
+    if (resolvedId) {
+      KAN_WORKSPACE_ID = resolvedId;
+      console.log(`   ✅ Resolved workspace: ${KAN_WORKSPACE_URL_SLUG} → ${KAN_WORKSPACE_ID}`);
+    } else {
+      console.error(`   ❌ Failed to resolve workspace URL slug "${KAN_WORKSPACE_URL_SLUG}"`);
+      return;
+    }
+  }
+  
+  // Check if sync interval changed
+  if (newSyncInterval !== oldSyncInterval) {
+    console.log(`   Sync interval changed: ${oldSyncInterval} → ${newSyncInterval} minutes`);
+    SYNC_INTERVAL_MINUTES = newSyncInterval;
+    startSyncInterval();
+    console.log(`   ✅ Sync interval updated to ${SYNC_INTERVAL_MINUTES} minutes`);
+  }
+  
+  // Clear board name cache if repositories changed
+  repoBoardNames.clear();
+  getRepositories(); // Re-populate board names cache
+  
+  console.log('✅ Configuration reloaded successfully');
+}
+
+/**
+ * Set up file watcher for config.json
+ */
+function setupConfigWatcher(): void {
+  if (!configPath) return;
+  
+  let reloadTimeout: NodeJS.Timeout | null = null;
+  let lastModified: number = 0;
+  
+  // Use watchFile for more reliable file watching (polls file stats)
+  // This works better than watch() on some file systems and with certain editors
+  watchFile(configPath, { interval: 1000 }, (curr, prev) => {
+    // Check if file was actually modified (mtime changed)
+    if (curr.mtimeMs !== prev.mtimeMs && curr.mtimeMs !== lastModified) {
+      lastModified = curr.mtimeMs;
+      
+      // Debounce rapid file changes (wait 500ms after last change)
+      if (reloadTimeout) {
+        clearTimeout(reloadTimeout);
+      }
+      
+      reloadTimeout = setTimeout(async () => {
+        try {
+          await reloadConfig();
+        } catch (error) {
+          console.error('Error reloading config:', error);
+        }
+      }, 500);
+    }
+  });
+  
+  console.log(`\n👀 Watching config file for changes: ${configPath}`);
+  console.log('   Configuration will reload automatically when you save config.json');
+}

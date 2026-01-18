@@ -1,13 +1,14 @@
 {
   "kanbn": {
-    "baseUrl": "https://kan.example.com"
+    "baseUrl": "https://kan.example.com",
+    "workspaceUrlSlug": "MAT"
   },
   "github": {
-    "repositories": [
-      "your-username/repo-one",
-      "your-username/repo-two",
-      "your-username/repo-three"
-    ]
+    "repositories": {
+      "your-username/repo-one": "My Custom Board Name",
+      "your-username/repo-two": "Another Board",
+      "your-username/repo-three": "Third Repository"
+    }
   },
   "sync": {
     "intervalMinutes": 1

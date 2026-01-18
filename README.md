@@ -68,9 +68,16 @@ Get up and running in minutes:
 
 ### 🐳 Docker
 
+**Production** (uses Docker Hub image):
 ```bash
 cd docker
 docker-compose up -d
+```
+
+**Development** (builds from local source):
+```bash
+cd docker
+docker-compose -f docker-compose.dev.yml up -d
 ```
 
 ---
