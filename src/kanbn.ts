@@ -60,11 +60,6 @@ export async function kanbnRequest<T>(
   };
 
   const method = options.method || 'GET';
-  
-  // Debug logging for failed requests
-  const debugMode = process.env.DEBUG === 'true';
-  if (debugMode) {
-  }
 
   const response = await fetch(url, {
     method,
@@ -105,7 +100,8 @@ export async function kanbnRequest<T>(
     }
 
     const fullErrorMsg = `Kanbn API error: ${method} ${url} → ${response.status} ${response.statusText} - ${errorText}`;
-    if (debugMode || response.status !== 404) {
+    // Don't log 404s as errors - they're handled gracefully
+    if (response.status !== 404) {
       console.error(`[ERROR] ${fullErrorMsg}`);
     }
     throw new Error(fullErrorMsg);
