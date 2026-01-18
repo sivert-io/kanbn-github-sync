@@ -49,34 +49,31 @@ esac
 NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
 echo -e "${GREEN}New version: ${NEW_VERSION}${NC}"
 
-# Update package.json
-node -e "const fs=require('fs');const pkg=require('$PROJECT_ROOT/package.json');pkg.version='$NEW_VERSION';fs.writeFileSync('$PROJECT_ROOT/package.json',JSON.stringify(pkg,null,2)+'\n')"
-
-# Verify we're on main branch
+# Verify we're on main branch (before making any changes)
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 if [ "$CURRENT_BRANCH" != "main" ]; then
   echo -e "${YELLOW}Warning: Not on main branch (currently on ${CURRENT_BRANCH})${NC}"
   read -p "Continue anyway? (y/N) " -n 1 -r
   echo
   if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    # Restore package.json version
-    node -e "const fs=require('fs');const pkg=require('$PROJECT_ROOT/package.json');pkg.version='$CURRENT_VERSION';fs.writeFileSync('$PROJECT_ROOT/package.json',JSON.stringify(pkg,null,2)+'\n')"
     exit 1
   fi
 fi
 
-# Check for uncommitted changes
+# Check for uncommitted changes (before making any changes)
 if ! git diff-index --quiet HEAD --; then
   echo -e "${YELLOW}Warning: You have uncommitted changes${NC}"
   git status --short
   read -p "Continue anyway? (y/N) " -n 1 -r
   echo
   if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    # Restore package.json version
-    node -e "const fs=require('fs');const pkg=require('$PROJECT_ROOT/package.json');pkg.version='$CURRENT_VERSION';fs.writeFileSync('$PROJECT_ROOT/package.json',JSON.stringify(pkg,null,2)+'\n')"
     exit 1
   fi
 fi
+
+# Now update package.json (after checking for changes)
+echo -e "${GREEN}Updating version in package.json...${NC}"
+node -e "const fs=require('fs');const pkg=require('$PROJECT_ROOT/package.json');pkg.version='$NEW_VERSION';fs.writeFileSync('$PROJECT_ROOT/package.json',JSON.stringify(pkg,null,2)+'\n')"
 
 # Docker Hub configuration (matches your convention: sivertio/kanbn-github-sync:latest)
 DOCKER_HUB_USER="${DOCKER_HUB_USER:-sivertio}"
