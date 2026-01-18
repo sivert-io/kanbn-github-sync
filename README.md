@@ -115,6 +115,8 @@
        "backlog": "📝 Backlog",
        "selected": "✨ Selected",
        "inProgress": "⚙️ In Progress",
+       "readyForQa": "✅ Ready for QA",
+       "qualityAssurance": "🔍 Quality Assurance",
        "completed": "🎉 Completed/Closed"
      }
    }
@@ -172,7 +174,7 @@ The service automatically creates boards and lists - you only need to configure:
 | `github.repositories` | ✅ Yes | Object mapping `"owner/repo"` to board names, or array for default naming |
 | `boards.defaultVisibility` | ❌ Optional | Default board visibility: `"private"` or `"public"` (default: `"private"`) |
 | `sync.intervalMinutes` | ❌ Optional | Sync interval in minutes (default: 5, minimum: 5 without GitHub token, minimum: 1 with token) |
-| `lists` | ❌ Optional | Custom list names with emoji. Defaults: `backlog`, `selected`, `inProgress`, `completed` |
+| `lists` | ❌ Optional | Custom list names with emoji. All 6 lists are created: `backlog`, `selected`, `inProgress`, `readyForQa`, `qualityAssurance`, `completed` |
 
 **Example repository configurations:**
 ```json
@@ -201,10 +203,12 @@ The service automatically creates boards and lists - you only need to configure:
 
 For each repository, the service automatically:
 1. Creates a **board** named after your repository (e.g., "owner - repo-name")
-2. Creates **four lists** in order:
+2. Creates **six lists** in order:
    - 📝 Backlog
    - ✨ Selected
    - ⚙️ In Progress
+   - ✅ Ready for QA
+   - 🔍 Quality Assurance
    - 🎉 Completed/Closed
 
 ### Automatic List Assignment
