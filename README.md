@@ -73,8 +73,6 @@
        environment:
          - NODE_ENV=production
    ```
-   
-   **Note:** The HTTP server (port) is optional. If you omit `server.port` from `config.json`, the service runs in polling-only mode without exposing any ports.
 
 3. **Create configuration files** (required - docker-compose needs these files to exist):
    ```bash
@@ -137,7 +135,6 @@ The service automatically creates boards and lists - you only need to configure:
 - `github.repositories` - Object mapping `"owner/repo"` to board names, or array for default naming
 - `sync.intervalMinutes` - Sync interval (default: 5 minutes, minimum: 5 without GitHub token)
 - `lists` - Custom list names (optional)
-- `server.port` - HTTP server port (optional, omit to run without HTTP server)
 
 👉 **See `config/env.example` and `config/config.json.example` for detailed examples and all available options.**
 

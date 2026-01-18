@@ -11,8 +11,6 @@ services:
     image: ${DOCKER_IMAGE:-sivertio/kanbn-github-sync:latest}
     container_name: kanbn-github-sync
     restart: unless-stopped
-    ports:
-      - "${PORT:-3001}:3001"
     env_file:
       - ../.env
     volumes:
@@ -22,8 +20,3 @@ services:
       - ../config/config.json:/app/config/config.json
     environment:
       - NODE_ENV=production
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
-      interval: 30s
-      timeout: 3s
-      retries: 3

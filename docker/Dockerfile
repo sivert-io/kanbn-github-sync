@@ -13,8 +13,5 @@ RUN yarn install --frozen-lockfile --production && yarn global add tsx
 COPY src/ ./src/
 COPY config/ ./config/
 
-# Expose port
-EXPOSE 3001
-
 # Start the service
 CMD ["tsx", "src/index.ts"]

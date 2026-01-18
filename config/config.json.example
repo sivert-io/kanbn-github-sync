@@ -18,8 +18,5 @@
     "selected": "✨ Selected",
     "inProgress": "⚙️ In Progress",
     "completed": "🎉 Completed/Closed"
-  },
-  "server": {
-    "port": 3001
   }
 }
