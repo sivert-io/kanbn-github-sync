@@ -8,12 +8,14 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Script directory
+# Script directory (scripts/)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+# Project root (parent of scripts/)
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
 
 # Get current version from package.json
-CURRENT_VERSION=$(node -p "require('./package.json').version")
+CURRENT_VERSION=$(node -p "require('$PROJECT_ROOT/package.json').version")
 echo -e "${GREEN}Current version: ${CURRENT_VERSION}${NC}"
 
 # Determine version bump type
@@ -48,7 +50,7 @@ NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
 echo -e "${GREEN}New version: ${NEW_VERSION}${NC}"
 
 # Update package.json
-node -e "const fs=require('fs');const pkg=require('./package.json');pkg.version='$NEW_VERSION';fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\n')"
+node -e "const fs=require('fs');const pkg=require('$PROJECT_ROOT/package.json');pkg.version='$NEW_VERSION';fs.writeFileSync('$PROJECT_ROOT/package.json',JSON.stringify(pkg,null,2)+'\n')"
 
 # Verify we're on main branch
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
@@ -58,7 +60,7 @@ if [ "$CURRENT_BRANCH" != "main" ]; then
   echo
   if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     # Restore package.json version
-    node -e "const fs=require('fs');const pkg=require('./package.json');pkg.version='$CURRENT_VERSION';fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\n')"
+    node -e "const fs=require('fs');const pkg=require('$PROJECT_ROOT/package.json');pkg.version='$CURRENT_VERSION';fs.writeFileSync('$PROJECT_ROOT/package.json',JSON.stringify(pkg,null,2)+'\n')"
     exit 1
   fi
 fi
@@ -71,7 +73,7 @@ if ! git diff-index --quiet HEAD --; then
   echo
   if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     # Restore package.json version
-    node -e "const fs=require('fs');const pkg=require('./package.json');pkg.version='$CURRENT_VERSION';fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\n')"
+    node -e "const fs=require('fs');const pkg=require('$PROJECT_ROOT/package.json');pkg.version='$CURRENT_VERSION';fs.writeFileSync('$PROJECT_ROOT/package.json',JSON.stringify(pkg,null,2)+'\n')"
     exit 1
   fi
 fi
