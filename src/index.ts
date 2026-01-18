@@ -29,6 +29,12 @@ interface Config {
   sync?: {
     intervalMinutes?: number;
   };
+  lists?: {
+    backlog?: string;
+    selected?: string;
+    inProgress?: string;
+    completed?: string;
+  };
   server?: {
     port?: number;
   };
@@ -148,13 +154,25 @@ function startSyncInterval(): void {
   }, intervalMs);
 }
 
-// Standard list names
-const LIST_NAMES = {
+// Default list names (can be overridden in config.json)
+const DEFAULT_LIST_NAMES = {
   BACKLOG: '📝 Backlog',
   SELECTED: '✨ Selected',
   IN_PROGRESS: '⚙️ In Progress',
   COMPLETED: '🎉 Completed/Closed',
 } as const;
+
+/**
+ * Get list names from config or use defaults
+ */
+function getListNames(): typeof DEFAULT_LIST_NAMES {
+  return {
+    BACKLOG: config.lists?.backlog || DEFAULT_LIST_NAMES.BACKLOG,
+    SELECTED: config.lists?.selected || DEFAULT_LIST_NAMES.SELECTED,
+    IN_PROGRESS: config.lists?.inProgress || DEFAULT_LIST_NAMES.IN_PROGRESS,
+    COMPLETED: config.lists?.completed || DEFAULT_LIST_NAMES.COMPLETED,
+  };
+}
 
 // Cache for repo -> custom board names
 const repoBoardNames = new Map<string, string>(); // repo -> custom board name
@@ -467,11 +485,12 @@ async function getOrCreateBoard(repoFullName: string): Promise<string> {
     
     // Define the default lists that should be created with the board
     // The API expects an array of list names (strings), not objects
+    const listNames = getListNames();
     const defaultLists = [
-      LIST_NAMES.BACKLOG,
-      LIST_NAMES.SELECTED,
-      LIST_NAMES.IN_PROGRESS,
-      LIST_NAMES.COMPLETED,
+      listNames.BACKLOG,
+      listNames.SELECTED,
+      listNames.IN_PROGRESS,
+      listNames.COMPLETED,
     ];
     
     const newBoard = await kanbnRequest<{ publicId: string; name: string }>(boardsEndpoint, {
@@ -540,7 +559,8 @@ async function getOrCreateLists(boardId: string, repoFullName: string): Promise<
   }
 
   // Create all required lists (if they don't exist)
-  const listOrder = [LIST_NAMES.BACKLOG, LIST_NAMES.SELECTED, LIST_NAMES.IN_PROGRESS, LIST_NAMES.COMPLETED];
+  const listNames = getListNames();
+  const listOrder = [listNames.BACKLOG, listNames.SELECTED, listNames.IN_PROGRESS, listNames.COMPLETED];
   for (let i = 0; i < listOrder.length; i++) {
     const listName = listOrder[i];
     
@@ -577,23 +597,25 @@ async function getOrCreateLists(boardId: string, repoFullName: string): Promise<
  * Determine which list an issue should be in based on its status
  */
 function determineListForIssue(issue: GitHubIssue): string {
+  const listNames = getListNames();
+  
   // Closed issues go to Completed
   if (issue.state === 'closed') {
-    return LIST_NAMES.COMPLETED;
+    return listNames.COMPLETED;
   }
 
   // Issues with associated PR (branch) go to In Progress
   if (issue.pull_request && issue.pull_request.url) {
-    return LIST_NAMES.IN_PROGRESS;
+    return listNames.IN_PROGRESS;
   }
 
   // Assigned issues go to Selected
   if (issue.assignees && issue.assignees.length > 0) {
-    return LIST_NAMES.SELECTED;
+    return listNames.SELECTED;
   }
 
   // Everything else goes to Backlog
-  return LIST_NAMES.BACKLOG;
+  return listNames.BACKLOG;
 }
 
 /**
@@ -946,19 +968,30 @@ async function fetchGitHubIssueComments(
           const xRateLimitReset = response.headers.get('X-RateLimit-Reset');
           
           let waitTime: number | null = null;
+          let resetTimestamp: number | null = null;
+          
           if (retryAfter) {
             waitTime = parseInt(retryAfter, 10);
+            resetTimestamp = Date.now() + (waitTime * 1000);
           } else if (xRateLimitReset) {
-            const resetTimestamp = parseInt(xRateLimitReset, 10) * 1000;
+            resetTimestamp = parseInt(xRateLimitReset, 10) * 1000;
             waitTime = Math.max(0, Math.ceil((resetTimestamp - Date.now()) / 1000));
           }
           
-          const waitMinutes = waitTime !== null && waitTime > 0 ? Math.ceil(waitTime / 60) : 60;
-          const waitSeconds = waitTime !== null && waitTime > 0 ? waitTime % 60 : 0;
-          // Show more precise wait time if less than 60 minutes
-          if (waitSeconds > 0 && waitMinutes < 60) {
-            throw new Error(`GitHub API rate limit exceeded. Waiting ${waitMinutes} minute(s) and ${waitSeconds} second(s) before trying again.`);
+          if (resetTimestamp && waitTime !== null && waitTime > 0) {
+            // Show the actual reset time in local timezone for easier understanding
+            const resetDate = new Date(resetTimestamp);
+            const resetTimeLocal = resetDate.toLocaleString('en-US', { 
+              hour: 'numeric',
+              minute: '2-digit',
+              second: '2-digit',
+              hour12: true,
+              timeZoneName: 'short'
+            });
+            const waitMinutes = Math.ceil(waitTime / 60);
+            throw new Error(`GitHub API rate limit exceeded. Rate limit resets at ${resetTimeLocal} (in ${waitMinutes} minute(s)).`);
           } else {
+            const waitMinutes = 60;
             throw new Error(`GitHub API rate limit exceeded. Waiting ${waitMinutes} minute(s) before trying again.`);
           }
         }
@@ -1011,24 +1044,29 @@ async function fetchGitHubIssues(
         const xRateLimitReset = response.headers.get('X-RateLimit-Reset');
         
         let waitTime: number | null = null;
+        let resetTimestamp: number | null = null;
         let waitMessage = '';
         
         if (retryAfter) {
           waitTime = parseInt(retryAfter, 10);
+          resetTimestamp = Date.now() + (waitTime * 1000);
         } else if (xRateLimitReset) {
-          const resetTimestamp = parseInt(xRateLimitReset, 10) * 1000; // Convert to milliseconds
+          resetTimestamp = parseInt(xRateLimitReset, 10) * 1000; // Convert to milliseconds
           waitTime = Math.max(0, Math.ceil((resetTimestamp - Date.now()) / 1000)); // Seconds until reset
         }
         
-        if (waitTime !== null && waitTime > 0) {
+        if (resetTimestamp && waitTime !== null && waitTime > 0) {
+          // Show the actual reset time in local timezone for easier understanding
+          const resetDate = new Date(resetTimestamp);
+          const resetTimeLocal = resetDate.toLocaleString('en-US', { 
+            hour: 'numeric',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true,
+            timeZoneName: 'short'
+          });
           const waitMinutes = Math.ceil(waitTime / 60);
-          const waitSeconds = waitTime % 60;
-          // Show more precise wait time (e.g., "55 minutes and 30 seconds" or just "55 minutes")
-          if (waitSeconds > 0 && waitMinutes < 60) {
-            waitMessage = ` Waiting ${waitMinutes} minute(s) and ${waitSeconds} second(s) before trying again.`;
-          } else {
-            waitMessage = ` Waiting ${waitMinutes} minute(s) before trying again.`;
-          }
+          waitMessage = ` Rate limit resets at ${resetTimeLocal} (in ${waitMinutes} minute(s)).`;
         } else {
           // Default to 60 minutes if we can't determine wait time
           waitMessage = ` Rate limit resets hourly. Waiting 60 minutes before trying again.`;
@@ -1085,25 +1123,46 @@ async function syncAllRepositories(): Promise<void> {
   });
   console.log(`\n[${timeStr}] Starting sync for ${repos.length} repositories...`);
 
+  // ========================================
+  // PHASE 1: SETUP - Create all boards and lists first
+  // ========================================
+  console.log('\n📋 Phase 1: Setting up boards and lists...');
+  const repoBoardMap = new Map<string, string>(); // repo -> boardId
+  
   for (const repoFullName of repos) {
+    try {
+      const boardId = await getOrCreateBoard(repoFullName);
+      await getOrCreateLists(boardId, repoFullName);
+      repoBoardMap.set(repoFullName, boardId);
+      console.log(`  ✅ ${repoFullName}: Board and lists ready`);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`  ❌ Failed to setup board/lists for ${repoFullName}: ${errorMsg}`);
+      // Continue with other repos even if one fails
+    }
+  }
+
+  // ========================================
+  // PHASE 2: SYNC - Fetch issues and sync cards
+  // ========================================
+  console.log('\n🔄 Phase 2: Syncing issues to cards...');
+
+  for (const repoFullName of repos) {
+    // Skip if board setup failed
+    if (!repoBoardMap.has(repoFullName)) {
+      console.warn(`  ⚠️  Skipping ${repoFullName} - board setup failed`);
+      continue;
+    }
+
     try {
       const [owner, repo] = repoFullName.split('/');
       if (!owner || !repo) {
-        console.warn(`Invalid repo format: ${repoFullName}`);
+        console.warn(`  ⚠️  Invalid repo format: ${repoFullName}`);
         continue;
       }
 
-      console.log(`Syncing ${repoFullName}...`);
+      console.log(`  Syncing ${repoFullName}...`);
       const repositoryUrl = `https://github.com/${repoFullName}`;
-      
-      // Ensure board and lists exist even if there are no issues
-      try {
-        const boardId = await getOrCreateBoard(repoFullName);
-        await getOrCreateLists(boardId, repoFullName);
-        console.log(`✅ Board and lists ready for ${repoFullName}`);
-      } catch (error) {
-        console.error(`Failed to ensure board/lists exist for ${repoFullName}:`, error);
-      }
       
       // Fetch all issues (open and closed) to track status changes
       let issues: GitHubIssue[] = [];
@@ -1113,15 +1172,14 @@ async function syncAllRepositories(): Promise<void> {
         const errorMsg = error instanceof Error ? error.message : String(error);
         if (errorMsg.includes('rate limit')) {
           // Extract wait time from error message if available
-          const waitMatch = errorMsg.match(/Waiting (\d+) minute/);
+          const waitMatch = errorMsg.match(/resets at (.+?) \(/);
           if (waitMatch) {
-            const waitMinutes = waitMatch[1];
-            console.error(`⏳ GitHub API rate limit exceeded. Waiting ${waitMinutes} minute(s) before trying again.`);
+            console.error(`  ⏳ GitHub API rate limit exceeded. ${errorMsg.split('rate limit exceeded.')[1]}`);
           } else {
-            console.error(`⏳ ${errorMsg}`);
+            console.error(`  ⏳ ${errorMsg}`);
           }
           // Stop syncing other repos if we hit rate limit
-          console.log(`⏸️  Stopping sync - rate limit reached. Remaining repositories will be skipped.`);
+          console.log(`  ⏸️  Stopping sync - rate limit reached. Remaining repositories will be skipped.`);
           break; // Exit the loop, don't try other repos
         } else {
           throw error; // Re-throw non-rate-limit errors
@@ -1151,7 +1209,7 @@ async function syncAllRepositories(): Promise<void> {
           const errorMsg = error instanceof Error ? error.message : String(error);
           // Don't spam logs for rate limit errors if we're handling retries
           if (!errorMsg.includes('rate limit') || errorMsg.includes('after')) {
-            console.error(`Failed to sync issue #${issue.number} from ${repoFullName}`, errorMsg);
+            console.error(`    ❌ Failed to sync issue #${issue.number} from ${repoFullName}: ${errorMsg}`);
           }
           errors++;
           
@@ -1162,12 +1220,12 @@ async function syncAllRepositories(): Promise<void> {
         }
       }
 
-      console.log(`✅ ${repoFullName}: ${created} created, ${updated} updated, ${errors} errors`);
+      console.log(`  ✅ ${repoFullName}: ${created} created, ${updated} updated, ${errors} errors`);
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       // For rate limit errors, we already logged a helpful message above
       if (!errorMsg.includes('rate limit')) {
-        console.error(`Failed to sync repository ${repoFullName}:`, errorMsg);
+        console.error(`  ❌ Failed to sync repository ${repoFullName}: ${errorMsg}`);
       }
     }
   }
@@ -1606,11 +1664,12 @@ async function initializeService(): Promise<void> {
   startSyncInterval();
 
   console.log(`✅ Polling started - will sync every ${SYNC_INTERVAL_MINUTES} minutes`);
+  const listNames = getListNames();
   console.log('   Issues are automatically assigned to lists based on status:');
-  console.log('   • Closed → 🎉 Completed/Closed');
-  console.log('   • Has branch/PR → ⚙️ In Progress');
-  console.log('   • Assigned → ✨ Selected');
-  console.log('   • Otherwise → 📝 Backlog');
+  console.log(`   • Closed → ${listNames.COMPLETED}`);
+  console.log(`   • Has branch/PR → ${listNames.IN_PROGRESS}`);
+  console.log(`   • Assigned → ${listNames.SELECTED}`);
+  console.log(`   • Otherwise → ${listNames.BACKLOG}`);
   
   // Set up config file watching for hot reload
   if (configPath) {
