@@ -1,6 +1,6 @@
 {
   "name": "kanbn-github-sync",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Automated GitHub issue synchronization to Kanbn — zero manual board setup",
   "main": "src/index.ts",
   "scripts": {
