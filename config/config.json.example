@@ -11,7 +11,7 @@
     }
   },
   "sync": {
-    "intervalMinutes": 1
+    "intervalMinutes": 5
   },
   "lists": {
     "backlog": "📝 Backlog",

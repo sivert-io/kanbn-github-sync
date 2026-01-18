@@ -8,7 +8,7 @@
 import dotenv from 'dotenv';
 import express, { Request, Response } from 'express';
 import fetch from 'node-fetch';
-import { readFileSync, watch, watchFile } from 'fs';
+import { readFileSync, watchFile } from 'fs';
 import { join } from 'path';
 
 // Load environment variables (for secrets)
@@ -88,11 +88,26 @@ const app = express();
 
 // Configuration (secrets from .env, config from config.json)
 const KAN_API_KEY = process.env.KAN_API_KEY || '';
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || ''; // Optional: for higher GitHub API rate limits (5000 req/hr)
+
+// Debug: Log if GitHub token is detected (masked for security)
+if (GITHUB_TOKEN) {
+  const maskedToken = GITHUB_TOKEN.substring(0, 10) + '...' + GITHUB_TOKEN.substring(GITHUB_TOKEN.length - 4);
+  console.log(`✅ GitHub token detected: ${maskedToken} (5000 requests/hour)`);
+} else {
+  console.log('ℹ️  No GitHub token found - using unauthenticated API (60 requests/hour)');
+}
+
 let KAN_BASE_URL = config.kanbn?.baseUrl || '';
 let KAN_WORKSPACE_URL_SLUG = config.kanbn?.workspaceUrlSlug || '';
 // Will be resolved from slug at startup
 let KAN_WORKSPACE_ID = '';
-let SYNC_INTERVAL_MINUTES = config.sync?.intervalMinutes || 1;
+// Minimum 5 minutes to avoid GitHub rate limits (60 requests/hour unauthenticated)
+const MIN_SYNC_INTERVAL_MINUTES = 5;
+const configuredInterval = config.sync?.intervalMinutes || 1;
+let SYNC_INTERVAL_MINUTES = configuredInterval < MIN_SYNC_INTERVAL_MINUTES 
+  ? MIN_SYNC_INTERVAL_MINUTES 
+  : configuredInterval;
 // HTTP server is optional - only start if port is configured
 const PORT = config.server?.port;
 
@@ -135,7 +150,7 @@ const repoBoardCache = new Map<string, string>(); // repo -> boardId
 const repoListCache = new Map<string, Map<string, string>>(); // repo -> (listName -> listId)
 
 // Sync interval timer (for reloading config)
-let syncIntervalTimer: NodeJS.Timeout | null = null;
+let syncIntervalTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
  * Start or restart the sync interval timer
@@ -165,7 +180,7 @@ const DEFAULT_LIST_NAMES = {
 /**
  * Get list names from config or use defaults
  */
-function getListNames(): typeof DEFAULT_LIST_NAMES {
+function getListNames(): { BACKLOG: string; SELECTED: string; IN_PROGRESS: string; COMPLETED: string } {
   return {
     BACKLOG: config.lists?.backlog || DEFAULT_LIST_NAMES.BACKLOG,
     SELECTED: config.lists?.selected || DEFAULT_LIST_NAMES.SELECTED,
@@ -388,13 +403,16 @@ async function kanbnRequest<T>(
     const isServerError = response.status === 500;
     
     if (isRateLimit || isServerError) {
-      const maxRetries = 5;
+      const maxRetries = 3;
       if (retryCount < maxRetries) {
-        // Exponential backoff: 1s, 2s, 4s, 8s, 16s
-        const backoffMs = Math.pow(2, retryCount) * 1000;
+        // Wait 1-2 minutes (90 seconds average) when rate limited by Kanbn
+        // Randomize between 60-120 seconds to avoid thundering herd
+        const waitMinutes = 1 + Math.random(); // 1-2 minutes
+        const waitSeconds = Math.floor(waitMinutes * 60); // 60-120 seconds
+        const waitMs = waitSeconds * 1000;
         const errorType = isServerError ? 'Server error (likely rate limited)' : 'Rate limit';
-        console.warn(`⏳ ${errorType}, retrying in ${backoffMs / 1000}s... (attempt ${retryCount + 1}/${maxRetries})`);
-        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        console.warn(`⏳ Kanbn API ${errorType} hit. Waiting ${waitSeconds}s (${Math.round(waitMinutes * 10) / 10} minute) before retry... (attempt ${retryCount + 1}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, waitMs));
         return kanbnRequest<T>(endpoint, options, retryCount + 1);
       } else {
         const errorType = isServerError ? 'Server errors (likely rate limited)' : 'Rate limit';
@@ -419,8 +437,10 @@ const labelCache = new Map<string, Map<string, string>>();
 const issueCardMap = new Map<string, string>(); // "owner/repo#123" -> "card_abc"
 
 // Rate limiting: track last request time and enforce minimum delay between requests
+// Kanbn API rate limit: 100 requests per minute = 600ms between requests
+// Using 650ms to stay safely under the limit with some buffer
 let lastRequestTime = 0;
-const MIN_REQUEST_DELAY_MS = 100; // Minimum 100ms between requests (10 requests/second max)
+const MIN_REQUEST_DELAY_MS = 650; // ~92 requests/minute (safely under Kanbn's 100 req/min limit)
 
 /**
  * Get or ensure board exists for a repository (create if needed)
@@ -723,17 +743,24 @@ async function syncIssueCard(
   // This prevents duplicates when service restarts
   if (!existingCardId) {
     try {
-      existingCardId = await findExistingCardByGitHubUrl(boardId, githubUrl);
-      if (existingCardId) {
+      const foundCardId = await findExistingCardByGitHubUrl(boardId, githubUrl, issue.title, issue.number);
+      if (foundCardId) {
+        existingCardId = foundCardId;
         // Cache it for future lookups
         issueCardMap.set(issueKey, existingCardId);
-        console.log(`  🔍 Found existing card for issue #${issue.number} (cache restored)`);
+        console.log(`  🔍 Found existing card for issue #${issue.number}: "${issue.title}" (cache restored)`);
+      } else {
+        // Debug: Log when we don't find an existing card (only for first few issues to avoid spam)
+        if (issue.number <= 110) {
+          // This might indicate search is failing or card doesn't exist yet
+        }
       }
     } catch (error) {
-      // If search fails, continue with card creation (might create duplicate, but better than failing)
+      // If search fails, log it but continue with card creation
+      // This might create duplicates, but it's better than failing completely
       const errorMsg = error instanceof Error ? error.message : String(error);
       if (!errorMsg.includes('500')) {
-        console.warn(`  ⚠️  Could not search for existing card: ${errorMsg}`);
+        console.warn(`  ⚠️  Could not search for existing card for issue #${issue.number}: ${errorMsg}`);
       }
     }
   }
@@ -806,10 +833,27 @@ async function syncIssueCard(
     memberPublicIds: [], // Required field - always include empty array
   };
 
-  let cardPublicId: string;
-
   if (existingCardId) {
     // Update existing card (including moving to correct list)
+    // First, fetch current card to check if it needs to move lists
+    let currentListId: string | undefined;
+    let currentListName: string | undefined;
+    try {
+      const currentCard = await kanbnRequest<KanbnCard & { listPublicId: string }>(`/cards/${existingCardId}`);
+      currentListId = currentCard.listPublicId;
+      
+      // Find the name of the current list
+      for (const [listName, listId] of listMap.entries()) {
+        if (listId === currentListId) {
+          currentListName = listName;
+          break;
+        }
+      }
+    } catch (error) {
+      // If we can't fetch the card, continue with update anyway
+      // (might fail, but we'll try)
+    }
+    
     // Note: Update endpoint doesn't require labelPublicIds/memberPublicIds
     // See: https://docs.kan.bn/api-reference/cards/update-a-card
     try {
@@ -822,8 +866,13 @@ async function syncIssueCard(
         method: 'PUT',
         body: updateData,
       });
-      cardPublicId = existingCardId;
-      console.log(`✅ Updated card for issue #${issue.number}: ${issue.title} → ${targetListName}`);
+      
+      // Log appropriate message based on whether card moved
+      if (currentListId && currentListId !== targetListId && currentListName) {
+        console.log(`🔄 Moved card for issue #${issue.number}: ${issue.title} (${currentListName} → ${targetListName})`);
+      } else {
+        console.log(`✅ Updated card for issue #${issue.number}: ${issue.title} → ${targetListName}`);
+      }
     } catch (error) {
       console.error(`Failed to update card for issue #${issue.number}:`, error);
       throw error;
@@ -838,7 +887,6 @@ async function syncIssueCard(
         body: cardData,
       });
       issueCardMap.set(issueKey, card.publicId);
-      cardPublicId = card.publicId;
       console.log(`✅ Created card for issue #${issue.number}: ${issue.title} → ${targetListName}`);
     } catch (error) {
       console.error(`Failed to create card for issue #${issue.number}:`, error);
@@ -853,26 +901,47 @@ async function syncIssueCard(
 }
 
 /**
- * Find existing card in board by searching for GitHub URL in card descriptions
+ * Find existing card in board by searching for GitHub URL in card descriptions or by title
  * This prevents duplicate card creation when service restarts
- * Note: This is a best-effort search - if it fails, we'll create a new card (may be duplicate)
+ * Searches by: GitHub URL in description, issue number pattern, and exact title match
  */
-async function findExistingCardByGitHubUrl(boardId: string, githubUrl: string): Promise<string | null> {
+async function findExistingCardByGitHubUrl(
+  boardId: string, 
+  githubUrl: string, 
+  issueTitle: string,
+  issueNumber: number
+): Promise<string | null> {
   try {
     // Try to use workspace search endpoint if available
     if (KAN_WORKSPACE_ID) {
       try {
-        // Use workspace search to find cards matching the GitHub URL
-        // Search query format may vary by API - try a simple text search
+        // Search by GitHub URL first
         const searchEndpoint = `/workspaces/${KAN_WORKSPACE_ID}/search`;
         const searchResults = await kanbnRequest<{
           cards?: Array<{ publicId: string; title: string; description?: string }>;
-        }>(`${searchEndpoint}?q=${encodeURIComponent(githubUrl)}`);
+        }>(`${searchEndpoint}?query=${encodeURIComponent(githubUrl)}`);
         
         if (searchResults.cards && searchResults.cards.length > 0) {
           // Find exact match by checking description contains the full GitHub URL
           const matchingCard = searchResults.cards.find(card =>
             card.description && card.description.includes(githubUrl)
+          );
+          
+          if (matchingCard) {
+            return matchingCard.publicId;
+          }
+        }
+        
+        // Also try searching by issue number pattern (e.g., "Issue #107")
+        const issueNumberPattern = `Issue #${issueNumber}`;
+        const searchByNumber = await kanbnRequest<{
+          cards?: Array<{ publicId: string; title: string; description?: string }>;
+        }>(`${searchEndpoint}?query=${encodeURIComponent(issueNumberPattern)}`);
+        
+        if (searchByNumber.cards && searchByNumber.cards.length > 0) {
+          // Find match by checking description contains issue number pattern
+          const matchingCard = searchByNumber.cards.find(card =>
+            card.description && card.description.includes(issueNumberPattern)
           );
           
           if (matchingCard) {
@@ -885,40 +954,91 @@ async function findExistingCardByGitHubUrl(boardId: string, githubUrl: string): 
       }
     }
     
-    // Fallback: Try to get board and search through lists (limited to avoid too many API calls)
-    // This is less efficient but works if search endpoint isn't available
+    // Fallback: Get board and search through ALL lists
+    // This is more thorough but requires more API calls
     try {
       const board = await kanbnRequest<{ 
         lists: Array<{ publicId: string; name: string }>;
+        cards?: Array<{ publicId: string; title: string; description?: string; listPublicId: string }>;
       }>(`/boards/${boardId}`);
       
+      // First, check if board endpoint returns cards directly (more efficient)
+      if (board.cards && board.cards.length > 0) {
+        // Match by GitHub URL in description
+        let matchingCard = board.cards.find(card =>
+          card.description && card.description.includes(githubUrl)
+        );
+        
+        // If no URL match, try matching by exact title (case-insensitive)
+        // This catches duplicates that might have been created before URL was added
+        if (!matchingCard) {
+          matchingCard = board.cards.find(card =>
+            card.title.trim().toLowerCase() === issueTitle.trim().toLowerCase()
+          );
+        }
+        
+        // Also try matching by issue number pattern in description
+        if (!matchingCard) {
+          const issueNumberPattern = `Issue #${issueNumber}`;
+          matchingCard = board.cards.find(card =>
+            card.description && card.description.includes(issueNumberPattern)
+          );
+        }
+        
+        if (matchingCard) {
+          return matchingCard.publicId;
+        }
+      }
+      
+      // If board doesn't return cards directly, search through lists
       if (!board.lists || board.lists.length === 0) {
         return null;
       }
       
-      // Only search the first 4 lists (our default lists: Backlog, Selected, In Progress, Completed)
-      // This avoids too many API calls while covering most cases
-      const listsToSearch = board.lists.slice(0, 4);
-      
-      for (const list of listsToSearch) {
+      // Search ALL lists, not just the first 4
+      // This ensures we find cards even if they're in custom lists
+      for (const list of board.lists) {
         try {
-          // Try to get cards from list (API might support this)
-          // If this endpoint doesn't exist, it will fail and we'll continue
+          // Try to get cards from list
+          // Note: This endpoint might not exist in all Kanbn API versions
           const listCards = await kanbnRequest<{
             cards?: Array<{ publicId: string; title: string; description?: string }>;
           }>(`/lists/${list.publicId}/cards`);
           
           if (listCards.cards && listCards.cards.length > 0) {
-            const matchingCard = listCards.cards.find(card =>
+            // Match by GitHub URL in description (primary method)
+            let matchingCard = listCards.cards.find(card =>
               card.description && card.description.includes(githubUrl)
             );
+            
+            // If no URL match, try matching by exact title (case-insensitive)
+            // This catches duplicates that might have been created before URL was added
+            if (!matchingCard) {
+              matchingCard = listCards.cards.find(card =>
+                card.title.trim().toLowerCase() === issueTitle.trim().toLowerCase()
+              );
+            }
+            
+            // Also try matching by issue number pattern in description
+            if (!matchingCard) {
+              const issueNumberPattern = `Issue #${issueNumber}`;
+              matchingCard = listCards.cards.find(card =>
+                card.description && card.description.includes(issueNumberPattern)
+              );
+            }
             
             if (matchingCard) {
               return matchingCard.publicId;
             }
           }
         } catch (error) {
-          // Endpoint might not exist - skip this list and continue
+          // Endpoint might not exist - this is expected if API doesn't support /lists/{id}/cards
+          // Continue to next list
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          // Only log if it's not a 404 (not found) - 404 means endpoint doesn't exist, which is expected
+          if (!errorMsg.includes('404') && !errorMsg.includes('Not found')) {
+            // Silent continue - this endpoint might not be available
+          }
           continue;
         }
       }
@@ -945,11 +1065,17 @@ async function fetchGitHubIssueComments(
   const headers: Record<string, string> = {
     Accept: 'application/vnd.github.v3+json',
   };
+  
+  // Add GitHub token if provided (for higher rate limits: 5000 req/hr vs 60 req/hr)
+  if (GITHUB_TOKEN) {
+    headers.Authorization = `Bearer ${GITHUB_TOKEN}`;
+  }
 
   const comments: GitHubComment[] = [];
   let page = 1;
   const perPage = 100;
 
+  // eslint-disable-next-line no-constant-condition
   while (true) {
     const url = `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=${perPage}&page=${page}`;
     const response = await fetch(url, { headers });
@@ -1025,14 +1151,41 @@ async function fetchGitHubIssues(
   const headers: Record<string, string> = {
     Accept: 'application/vnd.github.v3+json',
   };
+  
+  // Add GitHub token if provided (for higher rate limits: 5000 req/hr vs 60 req/hr)
+  if (GITHUB_TOKEN) {
+    headers.Authorization = `Bearer ${GITHUB_TOKEN}`;
+  }
 
   const issues: GitHubIssue[] = [];
   let page = 1;
   const perPage = 100;
 
+  // eslint-disable-next-line no-constant-condition
   while (true) {
     const url = `https://api.github.com/repos/${owner}/${repo}/issues?state=${state}&per_page=${perPage}&page=${page}`;
     const response = await fetch(url, { headers });
+    
+    // Check rate limit headers before processing response
+    const rateLimitRemaining = response.headers.get('X-RateLimit-Remaining');
+    if (rateLimitRemaining && parseInt(rateLimitRemaining, 10) === 0) {
+      // We're at the rate limit, get reset time and throw error
+      const xRateLimitReset = response.headers.get('X-RateLimit-Reset');
+      if (xRateLimitReset) {
+        const resetTimestamp = parseInt(xRateLimitReset, 10) * 1000;
+        const resetDate = new Date(resetTimestamp);
+        const resetTimeLocal = resetDate.toLocaleString('en-US', { 
+          hour: 'numeric',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: true,
+          timeZoneName: 'short'
+        });
+        const waitTime = Math.max(0, Math.ceil((resetTimestamp - Date.now()) / 1000));
+        const waitMinutes = Math.ceil(waitTime / 60);
+        throw new Error(`GitHub API rate limit exceeded. Rate limit resets at ${resetTimeLocal} (in ${waitMinutes} minute(s)).`);
+      }
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -1203,7 +1356,7 @@ async function syncAllRepositories(): Promise<void> {
             created++;
           }
           
-          // Small delay between issues to avoid overwhelming the API (100ms between issues, ~200ms total per issue with kanbnRequest delay)
+          // Small delay between issues to avoid overwhelming the API (additional 100ms between issues on top of 1s kanbnRequest delay)
           await new Promise(resolve => setTimeout(resolve, 100));
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : String(error);
@@ -1642,7 +1795,15 @@ async function initializeService(): Promise<void> {
   }
   
   // Configuration is valid, proceed with normal startup
-  console.log(`Sync interval: ${SYNC_INTERVAL_MINUTES} minutes`);
+  if (configuredInterval < MIN_SYNC_INTERVAL_MINUTES && !GITHUB_TOKEN) {
+    console.warn(`\n⚠️  Warning: Sync interval is ${configuredInterval} minute(s), but minimum is ${MIN_SYNC_INTERVAL_MINUTES} minutes to avoid GitHub API rate limits (60 requests/hour unauthenticated).`);
+    console.warn(`   Using ${MIN_SYNC_INTERVAL_MINUTES} minutes instead.`);
+    console.warn(`   💡 Tip: Set GITHUB_TOKEN in .env for higher rate limits (5000 requests/hour) to use shorter intervals.\n`);
+  } else if (configuredInterval < MIN_SYNC_INTERVAL_MINUTES && GITHUB_TOKEN) {
+    console.log(`\nℹ️  Sync interval is ${configuredInterval} minute(s). Using GitHub token for higher rate limits (5000 requests/hour).\n`);
+  }
+  
+  console.log(`Sync interval: ${SYNC_INTERVAL_MINUTES} minutes${GITHUB_TOKEN ? ' (with GitHub token - 5000 req/hr)' : ' (unauthenticated - 60 req/hr)'}`);
   if (repos.length > 0) {
     console.log(`Configured repositories (${repos.length}):`);
     repos.forEach((repo) => {
@@ -1655,9 +1816,23 @@ async function initializeService(): Promise<void> {
   }
   console.log('='.repeat(60));
 
-  // Start initial sync
+  // Start initial sync (with rate limit handling)
   syncAllRepositories().catch((error) => {
-    console.error('Initial sync failed:', error);
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    if (errorMsg.includes('rate limit')) {
+      // Extract reset time from error message
+      const resetMatch = errorMsg.match(/resets at (.+?) \(/);
+      if (resetMatch) {
+        console.warn(`\n⚠️  Initial sync skipped due to GitHub API rate limit.`);
+        console.warn(`   ${errorMsg.split('rate limit exceeded.')[1]}`);
+        console.warn(`   The service will automatically retry on the next scheduled sync (in ${SYNC_INTERVAL_MINUTES} minutes).\n`);
+      } else {
+        console.warn(`\n⚠️  Initial sync skipped due to GitHub API rate limit.`);
+        console.warn(`   The service will automatically retry on the next scheduled sync (in ${SYNC_INTERVAL_MINUTES} minutes).\n`);
+      }
+    } else {
+      console.error('Initial sync failed:', error);
+    }
   });
 
   // Set up polling interval
@@ -1702,7 +1877,10 @@ async function reloadConfig(): Promise<void> {
   // Update configuration variables
   KAN_BASE_URL = config.kanbn?.baseUrl || '';
   KAN_WORKSPACE_URL_SLUG = config.kanbn?.workspaceUrlSlug || '';
-  const newSyncInterval = config.sync?.intervalMinutes || 1;
+  const newConfiguredInterval = config.sync?.intervalMinutes || 1;
+  const newSyncInterval = newConfiguredInterval < MIN_SYNC_INTERVAL_MINUTES && !GITHUB_TOKEN
+    ? MIN_SYNC_INTERVAL_MINUTES
+    : newConfiguredInterval;
   
   // Check if workspace URL slug changed
   if (KAN_WORKSPACE_URL_SLUG !== oldWorkspaceUrlSlug) {
@@ -1745,7 +1923,7 @@ async function reloadConfig(): Promise<void> {
 function setupConfigWatcher(): void {
   if (!configPath) return;
   
-  let reloadTimeout: NodeJS.Timeout | null = null;
+  let reloadTimeout: ReturnType<typeof setTimeout> | null = null;
   let lastModified: number = 0;
   
   // Use watchFile for more reliable file watching (polls file stats)

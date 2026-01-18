@@ -87,7 +87,13 @@ The service automatically creates boards and lists - you only need to configure:
 
 **`.env`** (secrets):
 ```bash
+# Required: Kanbn API key
 KAN_API_KEY=kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Optional: GitHub token (for higher rate limits: 5000 requests/hour vs 60 requests/hour)
+# Without this, minimum sync interval is 5 minutes to avoid rate limits
+# Supports both Classic PAT (ghp_...) and Fine-grained PAT (github_pat_...)
+# GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 **`config/config.json`** (configuration):
@@ -104,7 +110,7 @@ KAN_API_KEY=kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     }
   },
   "sync": {
-    "intervalMinutes": 1
+    "intervalMinutes": 5
   },
   "lists": {
     "backlog": "📝 Backlog",
