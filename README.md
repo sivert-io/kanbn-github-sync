@@ -75,8 +75,10 @@
    ```
 
 3. **Create `.env` file** (required - contains API keys and secrets):
-   ```bash
-   cat > .env << 'EOF'
+   
+   Create a file named `.env` in your deployment directory and add the following content:
+   
+   ```env
    # Required: Kanbn API key
    KAN_API_KEY=kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
    
@@ -88,12 +90,17 @@
    #   - Fine-grained PAT: github_pat_11ABT...
    # Get your token from: https://github.com/settings/tokens
    # GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   EOF
    ```
+   
+   **What to change:**
+   - Replace `kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` with your actual Kanbn API key
+   - (Optional) Uncomment the `GITHUB_TOKEN` line and replace the value with your GitHub token for higher rate limits
 
 4. **Create `config.json` file** (required - contains service configuration):
-   ```bash
-   cat > config.json << 'EOF'
+   
+   Create a file named `config.json` in your deployment directory and add the following content:
+   
+   ```json
    {
      "kanbn": {
        "baseUrl": "https://kan.example.com",
@@ -120,19 +127,16 @@
        "completed": "🎉 Completed/Closed"
      }
    }
-   EOF
    ```
+   
+   **What to change:**
+   - `kanbn.baseUrl`: Replace `https://kan.example.com` with your Kanbn instance URL
+   - `kanbn.workspaceUrlSlug`: Replace `YOUR_WORKSPACE_SLUG` with your workspace slug (found in Kanbn Settings → Workspace URL)
+   - `github.repositories`: Replace `owner/repo-one` and `owner/repo-two` with your GitHub repository names (format: `owner/repository`)
+   - Customize board names (e.g., "My Board Name") as desired
+   - (Optional) Adjust `boards.defaultVisibility`, `sync.intervalMinutes`, and `lists` as needed
 
-5. **Edit `.env` and `config.json`** with your actual values:
-   - In `.env`: Replace `kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` with your Kanbn API key
-   - Optionally add `GITHUB_TOKEN` for higher rate limits
-   - In `config.json`:
-     - Replace `https://kan.example.com` with your Kanbn instance URL
-     - Replace `YOUR_WORKSPACE_SLUG` with your workspace slug (found in Kanbn Settings → Workspace URL)
-     - Replace `owner/repo-one`, `owner/repo-two` with your GitHub repositories
-     - Customize board names, visibility, list names, and sync interval as needed
-
-6. **Start the service:**
+5. **Start the service:**
    ```bash
    docker compose up -d
    ```
