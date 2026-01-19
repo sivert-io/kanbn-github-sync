@@ -74,19 +74,33 @@
          - NODE_ENV=production
    ```
 
-3. **Create configuration files** (required - docker compose needs these files to exist):
-   ```bash
-   # Create .env file
-   cat > .env << 'EOF'
+3. **Create `.env` file** (required - contains API keys and secrets):
+   
+   Create a file named `.env` in your deployment directory and add the following content:
+   
+   ```env
    # Required: Kanbn API key
    KAN_API_KEY=kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
    
-   # Optional: GitHub token (for higher rate limits)
+   # Optional: GitHub token (for higher rate limits: 5000 requests/hour vs 60 requests/hour)
+   # Without this, minimum sync interval is 5 minutes to avoid rate limits
+   # With this, you can use shorter intervals (e.g., 1 minute)
+   # Supports both token types:
+   #   - Classic PAT: ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   #   - Fine-grained PAT: github_pat_11ABT...
+   # Get your token from: https://github.com/settings/tokens
    # GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   EOF
+   ```
    
-   # Create config.json file
-   cat > config.json << 'EOF'
+   **What to change:**
+   - Replace `kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` with your actual Kanbn API key
+   - (Optional) Uncomment the `GITHUB_TOKEN` line and replace the value with your GitHub token for higher rate limits
+
+4. **Create `config.json` file** (required - contains service configuration):
+   
+   Create a file named `config.json` in your deployment directory and add the following content:
+   
+   ```json
    {
      "kanbn": {
        "baseUrl": "https://kan.example.com",
@@ -94,21 +108,33 @@
      },
      "github": {
        "repositories": {
-         "owner/repo-one": "My Board Name"
+         "owner/repo-one": "My Board Name",
+         "owner/repo-two": "Another Board"
        }
+     },
+     "boards": {
+       "defaultVisibility": "private"
      },
      "sync": {
        "intervalMinutes": 5
+     },
+     "lists": {
+       "backlog": "📝 Backlog",
+       "selected": "✨ Selected",
+       "inProgress": "⚙️ In Progress",
+       "readyForQa": "✅ Ready for QA",
+       "qualityAssurance": "🔍 Quality Assurance",
+       "completed": "🎉 Completed/Closed"
      }
    }
-   EOF
    ```
-
-4. **Edit `.env` and `config.json`** with your actual values:
-   - Replace `kan_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` with your Kanbn API key
-   - Replace `https://kan.example.com` with your Kanbn URL
-   - Replace `YOUR_WORKSPACE_SLUG` with your workspace slug
-   - Replace `owner/repo-one` with your GitHub repositories
+   
+   **What to change:**
+   - `kanbn.baseUrl`: Replace `https://kan.example.com` with your Kanbn instance URL
+   - `kanbn.workspaceUrlSlug`: Replace `YOUR_WORKSPACE_SLUG` with your workspace slug (found in Kanbn Settings → Workspace URL)
+   - `github.repositories`: Replace `owner/repo-one` and `owner/repo-two` with your GitHub repository names (format: `owner/repository`)
+   - Customize board names (e.g., "My Board Name") as desired
+   - (Optional) Adjust `boards.defaultVisibility`, `sync.intervalMinutes`, and `lists` as needed
 
 5. **Start the service:**
    ```bash
@@ -132,16 +158,43 @@
 
 The service automatically creates boards and lists - you only need to configure:
 
-**`.env`** (required in same directory as `docker-compose.yml`):
-- `KAN_API_KEY` - Your Kanbn API key (required)
-- `GITHUB_TOKEN` - GitHub token for higher rate limits (optional, supports both Classic PAT `ghp_...` and Fine-grained PAT `github_pat_...`)
+### Environment Variables (`.env`)
 
-**`config.json`** (required in same directory as `docker-compose.yml`):
-- `kanbn.baseUrl` - Your Kanbn instance URL
-- `kanbn.workspaceUrlSlug` - Your workspace slug (found in Kanbn Settings → Workspace URL)
-- `github.repositories` - Object mapping `"owner/repo"` to board names, or array for default naming
-- `sync.intervalMinutes` - Sync interval (default: 5 minutes, minimum: 5 without GitHub token)
-- `lists` - Custom list names (optional)
+**Required in same directory as `docker-compose.yml`**
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `KAN_API_KEY` | ✅ Yes | Your Kanbn API key |
+| `GITHUB_TOKEN` | ❌ Optional | GitHub token for higher rate limits (5000 vs 60 requests/hour). Supports both Classic PAT (`ghp_...`) and Fine-grained PAT (`github_pat_...`) |
+
+### Service Configuration (`config.json`)
+
+**Required in same directory as `docker-compose.yml`**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `kanbn.baseUrl` | ✅ Yes | Your Kanbn instance URL (e.g., `https://kan.example.com`) |
+| `kanbn.workspaceUrlSlug` | ✅ Yes | Your workspace slug (found in Kanbn Settings → Workspace URL) |
+| `github.repositories` | ✅ Yes | Object mapping `"owner/repo"` to board names, or array for default naming |
+| `boards.defaultVisibility` | ❌ Optional | Default board visibility: `"private"` or `"public"` (default: `"private"`) |
+| `sync.intervalMinutes` | ❌ Optional | Sync interval in minutes (default: 5, minimum: 5 without GitHub token, minimum: 1 with token) |
+| `lists` | ❌ Optional | Custom list names with emoji. All 6 lists are created: `backlog`, `selected`, `inProgress`, `readyForQa`, `qualityAssurance`, `completed` |
+
+**Example repository configurations:**
+```json
+{
+  "github": {
+    "repositories": {
+      "owner/repo-one": "Custom Board Name",
+      "owner/repo-two": {
+        "name": "Another Board",
+        "slug": "custom-slug",
+        "visibility": "public"
+      }
+    }
+  }
+}
+```
 
 👉 **See `config/env.example` and `config/config.json.example` for detailed examples and all available options.**
 
@@ -154,10 +207,12 @@ The service automatically creates boards and lists - you only need to configure:
 
 For each repository, the service automatically:
 1. Creates a **board** named after your repository (e.g., "owner - repo-name")
-2. Creates **four lists** in order:
+2. Creates **six lists** in order:
    - 📝 Backlog
    - ✨ Selected
    - ⚙️ In Progress
+   - ✅ Ready for QA
+   - 🔍 Quality Assurance
    - 🎉 Completed/Closed
 
 ### Automatic List Assignment
